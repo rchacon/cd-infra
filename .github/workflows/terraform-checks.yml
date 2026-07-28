@@ -1,0 +1,29 @@
+name: terraform checks
+
+on:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive terraform/
+
+      - name: terraform validate
+        run: |
+          set -e
+          for dir in terraform/*/; do
+            if ls "$dir"*.tf >/dev/null 2>&1; then
+              echo "== $dir =="
+              terraform -chdir="$dir" init -backend=false -input=false
+              terraform -chdir="$dir" validate
+            fi
+          done
