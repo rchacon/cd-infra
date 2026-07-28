@@ -15,8 +15,9 @@ overall AWS deployment tracking issue.
 
 ## `bootstrap/` -- one-time state backend setup
 
-Creates the S3 bucket + DynamoDB table that hold every other directory's
-Terraform state. Run once per AWS account, with local state (there's
+Creates the S3 bucket that holds every other directory's Terraform state
+(state locking uses the S3 backend's native `use_lockfile`, so no separate
+lock table is needed). Run once per AWS account, with local state (there's
 nothing else yet to store *this* config's state in):
 
 ```bash
@@ -26,9 +27,9 @@ terraform apply
 terraform output
 ```
 
-Note the `state_bucket_name` and `lock_table_name` outputs -- every other
-`terraform/*` directory's backend needs them (see below). This directory
-isn't touched again as part of normal workflow once it's applied.
+Note the `state_bucket_name` output -- every other `terraform/*` directory's
+backend needs it (see below). This directory isn't touched again as part of
+normal workflow once it's applied.
 
 ## `networking/` -- VPC, subnets, security groups
 
@@ -42,11 +43,10 @@ files). Supply it via a gitignored `backend.hcl`:
 ```bash
 cd terraform/networking
 cat > backend.hcl <<EOF
-bucket         = "<state_bucket_name from bootstrap output>"
-key            = "networking/terraform.tfstate"
-region         = "us-west-2"
-dynamodb_table = "<lock_table_name from bootstrap output>"
-encrypt        = true
+bucket  = "<state_bucket_name from bootstrap output>"
+key     = "networking/terraform.tfstate"
+region  = "us-west-2"
+encrypt = true
 EOF
 
 terraform init -backend-config=backend.hcl
@@ -54,10 +54,13 @@ terraform plan
 terraform apply
 ```
 
-Defaults: `us-west-2`, VPC CIDR `10.0.0.0/16`, 2 AZs, one shared NAT gateway
-(cheaper than one per AZ, at the cost of a single point of failure if that
-AZ has an outage -- see `variables.tf` for how to change this). Future
-`rds/`/`airflow/`/`cd-api/` directories (#2/#3/#4) will read this state's outputs
+Defaults: `us-west-2`, VPC CIDR `10.0.0.0/16`, 2 AZs. NAT gateway is off
+(`enable_nat_gateway = false`) until #2/#3/#4 actually need outbound internet
+from a private subnet -- flip it on (one shared gateway by default, cheaper
+than one per AZ at the cost of a single point of failure -- see
+`variables.tf` for how to change either) in whichever of those PRs lands
+first. Future `rds/`/`airflow/`/`cd-api/` directories (#2/#3/#4) will read
+this state's outputs
 (`vpc_id`, subnet IDs, security group IDs) via `terraform_remote_state`,
 using the same `backend.hcl` pattern with a different `key`.
 

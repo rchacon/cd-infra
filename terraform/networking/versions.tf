@@ -8,12 +8,16 @@ terraform {
     }
   }
 
-  # Partial configuration -- bucket/key/region/dynamodb_table are supplied
-  # via `terraform init -backend-config=backend.hcl` (gitignored), using
-  # the state_bucket_name/lock_table_name outputs from ../bootstrap. Left
-  # empty here since the bucket name is account-specific and shouldn't be
-  # hardcoded into version-controlled config.
-  backend "s3" {}
+  # Partial configuration -- bucket/key/region are supplied via `terraform
+  # init -backend-config=backend.hcl` (gitignored), using the
+  # state_bucket_name output from ../bootstrap. Left empty here since the
+  # bucket name is account-specific and shouldn't be hardcoded into
+  # version-controlled config. `use_lockfile` (native S3 state locking,
+  # Terraform >= 1.10) isn't account-specific, so it's set directly here
+  # instead of routed through backend.hcl.
+  backend "s3" {
+    use_lockfile = true
+  }
 }
 
 provider "aws" {
