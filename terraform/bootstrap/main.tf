@@ -36,12 +36,29 @@ resource "aws_s3_bucket_versioning" "terraform_state" {
   }
 }
 
+# Customer-managed key (rather than SSE-S3) so reading state requires both
+# s3:GetObject *and* kms:Decrypt on this key -- an IAM mistake that
+# over-grants one of the two isn't enough on its own to leak state
+# contents, and decrypts get their own CloudTrail trail tied to this key.
+resource "aws_kms_key" "terraform_state" {
+  description             = "Encrypts the Terraform state bucket."
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+}
+
+resource "aws_kms_alias" "terraform_state" {
+  name          = "alias/cd-platform-terraform-state"
+  target_key_id = aws_kms_key.terraform_state.key_id
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" {
   bucket = aws_s3_bucket.terraform_state.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.terraform_state.arn
     }
+    bucket_key_enabled = true
   }
 }
 

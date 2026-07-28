@@ -1,12 +1,5 @@
 locals {
-  # Shared by all three security groups below -- factored out so a future
-  # egress-hardening change only needs to happen in one place.
-  allow_all_egress = {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  postgres_port = 5432
 }
 
 module "vpc" {
@@ -42,29 +35,26 @@ resource "aws_security_group" "rds" {
 
   ingress {
     description     = "Postgres from the Airflow EC2 instance"
-    from_port       = 5432
-    to_port         = 5432
+    from_port       = local.postgres_port
+    to_port         = local.postgres_port
     protocol        = "tcp"
     security_groups = [aws_security_group.airflow.id]
   }
 
   ingress {
     description     = "Postgres from cd-api's Lambda"
-    from_port       = 5432
-    to_port         = 5432
+    from_port       = local.postgres_port
+    to_port         = local.postgres_port
     protocol        = "tcp"
     security_groups = [aws_security_group.lambda.id]
   }
 
-  dynamic "egress" {
-    for_each = [local.allow_all_egress]
-    content {
-      from_port   = egress.value.from_port
-      to_port     = egress.value.to_port
-      protocol    = egress.value.protocol
-      cidr_blocks = egress.value.cidr_blocks
-    }
-  }
+  # No egress block: RDS only responds to the inbound connections allowed
+  # above (security groups are stateful, so return traffic doesn't need its
+  # own rule) and doesn't itself initiate outbound connections in this
+  # setup. Terraform's aws_security_group manages egress authoritatively,
+  # so omitting this block means no egress is allowed at all -- not AWS's
+  # create-time default of allow-all.
 
   lifecycle {
     create_before_destroy = true
@@ -80,14 +70,24 @@ resource "aws_security_group" "airflow" {
   description = "cd-etl's self-hosted Airflow EC2 instance -- reaches RDS, S3, and api.congress.gov"
   vpc_id      = module.vpc.vpc_id
 
-  dynamic "egress" {
-    for_each = [local.allow_all_egress]
-    content {
-      from_port   = egress.value.from_port
-      to_port     = egress.value.to_port
-      protocol    = egress.value.protocol
-      cidr_blocks = egress.value.cidr_blocks
-    }
+  egress {
+    description = "HTTPS to api.congress.gov, PyPI, and AWS APIs -- arbitrary internet destinations with no fixed IP ranges to scope to"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    # Destinations (api.congress.gov, PyPI) aren't fixed IP ranges, so this
+    # can't be narrowed further without VPC endpoints -- accepted for this
+    # project's current stage.
+    #trivy:ignore:AWS-0104
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description     = "Postgres to RDS"
+    from_port       = local.postgres_port
+    to_port         = local.postgres_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.rds.id]
   }
 
   lifecycle {
@@ -104,14 +104,12 @@ resource "aws_security_group" "lambda" {
   description = "cd-api's Lambda -- reaches RDS (via RDS Proxy, see #4)"
   vpc_id      = module.vpc.vpc_id
 
-  dynamic "egress" {
-    for_each = [local.allow_all_egress]
-    content {
-      from_port   = egress.value.from_port
-      to_port     = egress.value.to_port
-      protocol    = egress.value.protocol
-      cidr_blocks = egress.value.cidr_blocks
-    }
+  egress {
+    description     = "Postgres to RDS"
+    from_port       = local.postgres_port
+    to_port         = local.postgres_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.rds.id]
   }
 
   lifecycle {
