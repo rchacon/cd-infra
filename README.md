@@ -20,11 +20,11 @@ flowchart TB
             rds_sg{{"rds SG"}}
             airflow_sg{{"airflow SG"}}
             lambda_sg{{"lambda SG"}}
+            rds[("RDS Postgres<br/>#2 -- no schema yet")]
         end
     end
 
     subgraph future["Not yet provisioned"]
-        rds[("RDS Postgres<br/>#2")]
         airflow["Airflow EC2<br/>#3"]
         lambda[["cd-api Lambda<br/>#4"]]
     end
@@ -32,20 +32,24 @@ flowchart TB
     internet --- igw
     igw --- pub
 
+    rds -- protected by --> rds_sg
     airflow -. attaches to .-> airflow_sg
     lambda -. attaches to .-> lambda_sg
-    rds -. attaches to .-> rds_sg
 
     airflow_sg -- "HTTPS :443" --> internet
     airflow_sg -- "Postgres :5432" --> rds_sg
     lambda_sg -- "Postgres :5432" --> rds_sg
 
     classDef planned stroke-dasharray: 5 5
-    class rds,airflow,lambda planned
+    class airflow,lambda planned
 ```
 
-Dashed nodes (RDS, Airflow EC2, cd-api's Lambda) aren't provisioned yet --
-only their security groups exist so far, reserved by `networking/` for
-whichever of #2/#3/#4 lands first. `bootstrap/`'s S3 state bucket and KMS
-key aren't part of this diagram -- they hold Terraform's own state and sit
-outside the VPC entirely, unrelated to the app's runtime traffic.
+RDS (#2) is provisioned -- encrypted under its own customer-managed KMS
+key, single-AZ, reachable only from the `airflow`/`lambda` security groups
+-- but has no schema yet: that's blocked on #3's Airflow EC2 instance
+existing (the only durable path to actually reach it) to run the initial
+Alembic migration. Dashed nodes (Airflow EC2, cd-api's Lambda) aren't
+provisioned at all yet -- only their security groups exist so far.
+`bootstrap/`'s S3 state bucket/KMS key and `rds/`'s own KMS key aren't part
+of this diagram -- they're supporting resources, not part of the app's
+runtime traffic path.
