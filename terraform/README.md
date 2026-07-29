@@ -58,7 +58,7 @@ terraform apply
 ```
 
 Defaults: `us-west-2`, VPC CIDR `10.0.0.0/16`, 2 AZs. NAT gateway is off
-(`enable_nat_gateway = false`) until #2/#3/#4 actually need outbound internet
+(`enable_nat_gateway = false`) until #3/#4 actually need outbound internet
 from a private subnet -- flip it on (one shared gateway by default, cheaper
 than one per AZ at the cost of a single point of failure -- see
 `variables.tf` for how to change either) in whichever of those PRs lands

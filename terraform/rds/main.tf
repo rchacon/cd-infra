@@ -62,8 +62,11 @@ resource "aws_db_instance" "this" {
   username = var.master_username
 
   # RDS-managed password via Secrets Manager -- no password/password_wo set,
-  # so it's never stored in Terraform state in plaintext.
-  manage_master_user_password = true
+  # so it's never stored in Terraform state in plaintext. Encrypted under
+  # our own KMS key (not the AWS-managed default) for the same reason the
+  # storage above is.
+  manage_master_user_password   = true
+  master_user_secret_kms_key_id = aws_kms_key.rds.arn
 
   db_subnet_group_name   = aws_db_subnet_group.this.name
   vpc_security_group_ids = [data.terraform_remote_state.networking.outputs.rds_security_group_id]
