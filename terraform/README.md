@@ -5,6 +5,9 @@ AWS infrastructure for this repo, provisioned incrementally by component:
 and eventually `rds/` (#2), `airflow/` (#3), `cd-api/` (#4). See #5 for the
 overall AWS deployment tracking issue.
 
+See the root `README.md` for an architecture diagram of the VPC, security
+groups, and planned compute resources.
+
 ## Prerequisites
 
 - [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.15
