@@ -34,7 +34,13 @@ variable "congress_api_key" {
 }
 
 variable "airflow_metadata_db_name" {
-  description = "Name of the sibling database on RDS holding Airflow's own metadata (matches local dev's docker-compose.yml). Created once manually via `CREATE DATABASE` -- RDS has no docker-entrypoint-initdb.d equivalent -- see terraform/README.md."
+  description = "Name of the sibling database on RDS holding Airflow's own metadata (matches local dev's docker-compose.yml). Created idempotently by the instance's first-boot bootstrap (RDS has no docker-entrypoint-initdb.d equivalent) -- see terraform/README.md."
   type        = string
   default     = "airflow_metadata"
+}
+
+variable "cd_etl_db_username" {
+  description = "Postgres role cd-etl/Airflow connect as for ongoing runtime traffic -- scoped to its own databases, never the RDS master/superuser credentials (which are used only transiently, by the instance's boot-time bootstrap, to create this role and grant it access)."
+  type        = string
+  default     = "cd_etl_app"
 }

@@ -48,6 +48,39 @@ resource "aws_secretsmanager_secret_version" "congress_api_key" {
   secret_string = var.congress_api_key
 }
 
+# Least-privilege runtime credential for cd-etl/Airflow's ongoing database
+# traffic -- the RDS master/superuser credentials (above, via
+# rds_master_secret_arn) are used only transiently by this instance's
+# boot-time bootstrap, to create this role and the airflow_metadata
+# database, never as the app's own runtime connection.
+resource "random_password" "cd_etl_app" {
+  length = 32
+  # No special characters -- this password gets embedded directly into a
+  # SQL string literal by the boot-time bootstrap script (see
+  # user-data.sh.tftpl); alphanumeric-only sidesteps SQL-quoting escaping
+  # entirely rather than getting it right for an arbitrary character set.
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "cd_etl_app_db" {
+  name       = "cd-platform/airflow/cd-etl-db-credentials"
+  kms_key_id = aws_kms_key.airflow.arn
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+# Same {"username":..., "password":...} JSON shape as RDS's own
+# master-user secret, so the boot script parses both identically.
+resource "aws_secretsmanager_secret_version" "cd_etl_app_db" {
+  secret_id = aws_secretsmanager_secret.cd_etl_app_db.id
+  secret_string = jsonencode({
+    username = var.cd_etl_db_username
+    password = random_password.cd_etl_app.result
+  })
+}
+
 data "aws_iam_policy_document" "airflow_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -83,6 +116,7 @@ data "aws_iam_policy_document" "airflow_instance" {
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
       aws_secretsmanager_secret.congress_api_key.arn,
+      aws_secretsmanager_secret.cd_etl_app_db.arn,
       data.terraform_remote_state.rds.outputs.master_user_secret_arn,
     ]
   }
@@ -143,9 +177,11 @@ resource "aws_instance" "airflow" {
   user_data = templatefile("${path.module}/templates/user-data.sh.tftpl", {
     aws_region                  = var.aws_region
     congress_api_key_secret_arn = aws_secretsmanager_secret.congress_api_key.arn
+    cd_etl_app_db_secret_arn    = aws_secretsmanager_secret.cd_etl_app_db.arn
     rds_master_secret_arn       = data.terraform_remote_state.rds.outputs.master_user_secret_arn
     rds_address                 = data.terraform_remote_state.rds.outputs.rds_address
     airflow_metadata_db_name    = var.airflow_metadata_db_name
+    cd_etl_db_username          = var.cd_etl_db_username
     ghcr_image                  = "ghcr.io/${var.github_repository_owner}/cd-etl"
   })
   # Without this, Terraform only runs user_data on first boot -- editing the
@@ -156,12 +192,15 @@ resource "aws_instance" "airflow" {
   # live traffic to preserve.
   user_data_replace_on_change = true
 
-  # The secret needs its actual value written before this instance's
-  # user_data can fetch it -- referencing the parent secret's ARN above
+  # Both secrets need their actual values written before this instance's
+  # user_data can fetch them -- referencing the parent secrets' ARNs above
   # doesn't imply that ordering on its own, since aws_instance.airflow and
-  # aws_secretsmanager_secret_version.congress_api_key both only depend on
-  # aws_secretsmanager_secret.congress_api_key, not on each other.
-  depends_on = [aws_secretsmanager_secret_version.congress_api_key]
+  # each aws_secretsmanager_secret_version only depend on their own parent
+  # aws_secretsmanager_secret, not on each other.
+  depends_on = [
+    aws_secretsmanager_secret_version.congress_api_key,
+    aws_secretsmanager_secret_version.cd_etl_app_db,
+  ]
 
   # Ignore subsequent AMI changes after first creation -- otherwise every
   # AWS-published AL2023 arm64 build would show as an unprompted

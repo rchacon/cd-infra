@@ -8,7 +8,11 @@ set -euo pipefail
 # v2 plugin by default, so it needs installing explicitly -- the AWS CLI
 # v2 is already preinstalled on the AL2023 base AMI, so it's not in this
 # list (there's no "aws-cli" dnf package on AL2023 to install it from).
-dnf install -y docker docker-compose-plugin jq
+# postgresql16 (matching rds/'s engine_version) provides the psql client
+# used by the one-time bootstrap below -- unverified against a real AL2023
+# boot as of this writing (see the aws-cli lesson elsewhere in this file);
+# confirm this package name resolves on the first real apply.
+dnf install -y docker docker-compose-plugin jq postgresql16
 systemctl enable --now docker
 
 REGION="${aws_region}"
@@ -21,23 +25,58 @@ RDS_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
   --secret-id "${rds_master_secret_arn}" --query SecretString --output text)
 RDS_USER=$(echo "$RDS_SECRET" | jq -r .username)
 RDS_PASS=$(echo "$RDS_SECRET" | jq -r .password)
-# URL-encode both before interpolating into connection URIs below -- RDS's
+
+CD_ETL_APP_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
+  --secret-id "${cd_etl_app_db_secret_arn}" --query SecretString --output text)
+CD_ETL_APP_USER=$(echo "$CD_ETL_APP_SECRET" | jq -r .username)
+CD_ETL_APP_PASS=$(echo "$CD_ETL_APP_SECRET" | jq -r .password)
+# URL-encode before interpolating into the connection URI below -- RDS's
 # managed-password generator doesn't guarantee excluding every
 # URI-significant character (e.g. ":"), and an unescaped one would
 # silently corrupt the connection string.
-RDS_USER_ENC=$(jq -rn --arg s "$RDS_USER" '$s|@uri')
-RDS_PASS_ENC=$(jq -rn --arg s "$RDS_PASS" '$s|@uri')
+CD_ETL_APP_USER_ENC=$(jq -rn --arg s "$CD_ETL_APP_USER" '$s|@uri')
+CD_ETL_APP_PASS_ENC=$(jq -rn --arg s "$CD_ETL_APP_PASS" '$s|@uri')
+
+# One-time, idempotent bootstrap (safe to re-run on every boot) using the
+# RDS master/superuser credentials -- creates the airflow_metadata database
+# (RDS has no docker-entrypoint-initdb.d equivalent) and a scoped
+# least-privilege role for cd-etl/Airflow's own ongoing traffic. The master
+# credentials are used only here, never written to the .env file below or
+# exposed to cd-etl's container.
+#
+# format()'s %L already quotes the password safely, so this avoids `DO $$
+# ... $$` PL/pgSQL blocks entirely -- bash would expand an unescaped `$$`
+# in a heredoc to its own PID, corrupting Postgres's dollar-quoting syntax.
+export PGPASSWORD="$RDS_PASS"
+psql -h ${rds_address} -U "$RDS_USER" -d postgres -v ON_ERROR_STOP=1 <<-SQL
+SELECT 'CREATE DATABASE ${airflow_metadata_db_name}'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${airflow_metadata_db_name}')\gexec
+
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', '${cd_etl_db_username}', '$CD_ETL_APP_PASS')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${cd_etl_db_username}')\gexec
+
+ALTER ROLE "${cd_etl_db_username}" WITH PASSWORD '$CD_ETL_APP_PASS';
+SQL
+
+for db in cd_platform ${airflow_metadata_db_name}; do
+  psql -h ${rds_address} -U "$RDS_USER" -d "$db" -v ON_ERROR_STOP=1 <<-SQL
+GRANT ALL PRIVILEGES ON DATABASE "$db" TO "${cd_etl_db_username}";
+GRANT ALL ON SCHEMA public TO "${cd_etl_db_username}";
+SQL
+done
+unset PGPASSWORD
 
 mkdir -p /opt/airflow
 
 # db name here ("cd_platform") matches rds/main.tf's aws_db_instance.this
 # db_name -- NOT local dev's docker-compose.yml, which uses
 # "congressional_app" for the same role (a known, pre-existing naming
-# difference between this repo and cd-platform's local dev).
+# difference between this repo and cd-platform's local dev). Connects as
+# the scoped role created above, never the RDS master user.
 cat > /opt/airflow/.env <<EOF
 CONGRESS_API_KEY=$CONGRESS_API_KEY
-AIRFLOW_CONN_CONGRESSIONAL_POSTGRES=postgresql://$${RDS_USER_ENC}:$${RDS_PASS_ENC}@${rds_address}:5432/cd_platform
-AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://$${RDS_USER_ENC}:$${RDS_PASS_ENC}@${rds_address}:5432/${airflow_metadata_db_name}
+AIRFLOW_CONN_CONGRESSIONAL_POSTGRES=postgresql://$${CD_ETL_APP_USER_ENC}:$${CD_ETL_APP_PASS_ENC}@${rds_address}:5432/cd_platform
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://$${CD_ETL_APP_USER_ENC}:$${CD_ETL_APP_PASS_ENC}@${rds_address}:5432/${airflow_metadata_db_name}
 EOF
 chmod 600 /opt/airflow/.env
 

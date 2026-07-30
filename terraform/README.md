@@ -141,15 +141,16 @@ terraform plan
 terraform apply
 ```
 
-**The one-time `CREATE DATABASE airflow_metadata;` step is manual, not
-Terraform-managed** (mirrors `rds/`'s own precedent of leaving schema
-bootstrap out of Terraform) -- RDS has no `docker-entrypoint-initdb.d`
-equivalent to create this sibling database automatically, and this
-instance is the only thing that can reach RDS at all (per its security
-group). Run it once, right after `terraform apply`, via an SSM shell
-session (see below) -- `cd-etl`'s container will fail to start (its
-entrypoint's `airflow db migrate` needs that database to exist) until this
-step is done.
+**`airflow_metadata` and a least-privilege database role are bootstrapped
+automatically on first boot**, not by Terraform itself -- RDS has no
+`docker-entrypoint-initdb.d` equivalent, and this instance is the only
+thing that can reach RDS at all (per its security group), so `user-data`
+runs an idempotent `psql` bootstrap using the RDS master/superuser
+credentials to (1) create the `airflow_metadata` database and (2) create
+(or update the password of) a scoped `cd_etl_db_username` role, granted
+access to both `cd_platform` and `airflow_metadata` only. `cd-etl`'s
+container connects as that scoped role, never the RDS master user -- the
+master credentials are used only transiently, at boot, for this bootstrap.
 
 **The Airflow UI (port 8080) has no public ingress, ever** -- access it via
 SSM Session Manager port-forwarding, not a VPN (a VPN's per-subnet-
@@ -157,7 +158,7 @@ association billing alone would dwarf this project's entire AWS spend for
 occasional admin access to one DAG's UI):
 
 ```bash
-# Shell session (e.g. for the one-time CREATE DATABASE step, or `docker logs`):
+# Shell session (e.g. for `docker logs`, or re-running the bootstrap by hand):
 aws ssm start-session --target "$(terraform output -raw instance_id)"
 
 # Port-forward the Airflow UI to localhost:8080:

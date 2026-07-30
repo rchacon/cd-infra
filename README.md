@@ -49,10 +49,12 @@ encrypted under its own customer-managed KMS key, single-AZ, reachable
 only from the `airflow`/`lambda` security groups; its schema comes from
 `cd-etl`'s container migrating itself on every start, run from the Airflow
 instance -- the only durable path to reach RDS. The sibling
-`airflow_metadata` database itself still needs a one-time manual `CREATE
-DATABASE` (RDS has no equivalent to a Postgres init script), documented in
-`terraform/README.md`. The Airflow instance itself has no public ingress
-at all --
+`airflow_metadata` database and a scoped least-privilege database role are
+both bootstrapped automatically on the Airflow instance's first boot (RDS
+has no equivalent to a Postgres init script), using the RDS master
+credentials only transiently -- `cd-etl` connects as the scoped role, never
+the master user. Documented in `terraform/README.md`. The Airflow instance
+itself has no public ingress at all --
 runs `cd-etl` + a `watchtower` sidecar polling GHCR for new releases, and
 is reachable only via SSM Session Manager (shell or port-forwarding to its
 UI), never a public IP. The dashed node (cd-api's Lambda) isn't provisioned
