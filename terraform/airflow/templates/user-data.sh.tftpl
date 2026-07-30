@@ -44,6 +44,10 @@ echo "$GHCR_PAT" | docker login ghcr.io -u token --password-stdin
 cat > /opt/airflow/docker-compose.yml <<EOF
 services:
   cd-etl:
+    # Must be the mutable "latest" tag, not a "vX.X.X" one -- watchtower
+    # tracks a single tag/digest per container and has no semver awareness
+    # to compare across differently-named version tags, so it can only
+    # detect new releases by polling the tag it's already watching.
     image: ${ghcr_image}:latest
     restart: unless-stopped
     env_file: .env
