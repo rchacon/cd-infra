@@ -17,12 +17,14 @@ data "terraform_remote_state" "rds" {
 }
 
 # Customer-managed key (rather than the AWS-managed default) so reading
-# CONGRESS_API_KEY requires both Secrets Manager access *and* kms:Decrypt
-# on this specific key -- same defense-in-depth reasoning as
-# ../bootstrap's state-bucket key and ../rds's storage key, and the same
-# flat ~$1/mo.
+# CONGRESS_API_KEY or the instance's root volume requires both
+# Secrets Manager/EC2 access *and* kms:Decrypt on this specific key --
+# same defense-in-depth reasoning as ../bootstrap's state-bucket key and
+# ../rds's storage key, and the same flat ~$1/mo. Shared by both uses
+# below rather than provisioning a second key, since they're both this
+# component's own data at rest.
 resource "aws_kms_key" "airflow" {
-  description             = "Encrypts CONGRESS_API_KEY in Secrets Manager."
+  description             = "Encrypts CONGRESS_API_KEY and the airflow instance's root volume."
   deletion_window_in_days = 30
   enable_key_rotation     = true
 }
@@ -151,6 +153,23 @@ resource "aws_instance" "airflow" {
   # user-data edit -- acceptable for a single once-a-day batch job with no
   # live traffic to preserve.
   user_data_replace_on_change = true
+
+  # Enforces IMDSv2 (session-token-authenticated instance metadata calls) --
+  # the AWS provider defaults http_tokens to "optional", which still allows
+  # the older, SSRF-exploitable IMDSv1 style of unauthenticated requests.
+  metadata_options {
+    http_tokens   = "required"
+    http_endpoint = "enabled"
+  }
+
+  # Reuses the same customer-managed KMS key as the Secrets Manager secret
+  # above, rather than the AWS-managed default -- consistent with this
+  # project's KMS pattern (see CLAUDE.md), at no extra cost since the key
+  # already exists.
+  root_block_device {
+    encrypted  = true
+    kms_key_id = aws_kms_key.airflow.arn
+  }
 
   tags = {
     Project = "cd-platform"
