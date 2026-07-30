@@ -46,10 +46,13 @@ flowchart TB
 
 RDS (#2) and the Airflow EC2 instance (#3) are both provisioned. RDS is
 encrypted under its own customer-managed KMS key, single-AZ, reachable
-only from the `airflow`/`lambda` security groups; its schema (and Airflow's
-own metadata database) come from `cd-etl`'s container migrating itself on
-every start, run from the Airflow instance -- the only durable path to
-reach RDS. The Airflow instance itself has no public ingress at all --
+only from the `airflow`/`lambda` security groups; its schema comes from
+`cd-etl`'s container migrating itself on every start, run from the Airflow
+instance -- the only durable path to reach RDS. The sibling
+`airflow_metadata` database itself still needs a one-time manual `CREATE
+DATABASE` (RDS has no equivalent to a Postgres init script), documented in
+`terraform/README.md`. The Airflow instance itself has no public ingress
+at all --
 runs `cd-etl` + a `watchtower` sidecar polling GHCR for new releases, and
 is reachable only via SSM Session Manager (shell or port-forwarding to its
 UI), never a public IP. The dashed node (cd-api's Lambda) isn't provisioned

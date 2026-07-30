@@ -5,8 +5,10 @@ set -euo pipefail
 # cd-etl's image bundles its own dependencies, DAG code, and migrations
 # (both Airflow's own and cd-etl's alembic ones), applied automatically by
 # its entrypoint on every container start. AL2023 doesn't ship the Compose
-# v2 plugin or AWS CLI v2 by default, so both need installing explicitly.
-dnf install -y docker docker-compose-plugin aws-cli jq
+# v2 plugin by default, so it needs installing explicitly -- the AWS CLI
+# v2 is already preinstalled on the AL2023 base AMI, so it's not in this
+# list (there's no "aws-cli" dnf package on AL2023 to install it from).
+dnf install -y docker docker-compose-plugin jq
 systemctl enable --now docker
 
 REGION="${aws_region}"
@@ -19,6 +21,12 @@ RDS_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
   --secret-id "${rds_master_secret_arn}" --query SecretString --output text)
 RDS_USER=$(echo "$RDS_SECRET" | jq -r .username)
 RDS_PASS=$(echo "$RDS_SECRET" | jq -r .password)
+# URL-encode both before interpolating into connection URIs below -- RDS's
+# managed-password generator doesn't guarantee excluding every
+# URI-significant character (e.g. ":"), and an unescaped one would
+# silently corrupt the connection string.
+RDS_USER_ENC=$(jq -rn --arg s "$RDS_USER" '$s|@uri')
+RDS_PASS_ENC=$(jq -rn --arg s "$RDS_PASS" '$s|@uri')
 
 mkdir -p /opt/airflow
 
@@ -28,8 +36,8 @@ mkdir -p /opt/airflow
 # difference between this repo and cd-platform's local dev).
 cat > /opt/airflow/.env <<EOF
 CONGRESS_API_KEY=$CONGRESS_API_KEY
-AIRFLOW_CONN_CONGRESSIONAL_POSTGRES=postgresql://$${RDS_USER}:$${RDS_PASS}@${rds_address}:5432/cd_platform
-AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://$${RDS_USER}:$${RDS_PASS}@${rds_address}:5432/${airflow_metadata_db_name}
+AIRFLOW_CONN_CONGRESSIONAL_POSTGRES=postgresql://$${RDS_USER_ENC}:$${RDS_PASS_ENC}@${rds_address}:5432/cd_platform
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://$${RDS_USER_ENC}:$${RDS_PASS_ENC}@${rds_address}:5432/${airflow_metadata_db_name}
 EOF
 chmod 600 /opt/airflow/.env
 
@@ -45,14 +53,32 @@ services:
     image: ${ghcr_image}:latest
     restart: unless-stopped
     env_file: .env
+    # Published so SSM port-forwarding (see terraform/README.md) has
+    # something listening on the host side to forward to.
+    ports:
+      - "8080:8080"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+    # Caps json-file log growth -- Airflow's own logs plus container
+    # stdout/stderr have no other size limit on this instance's small
+    # root volume (watchtower's --cleanup below only prunes old images,
+    # not logs).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   watchtower:
     image: containrrr/watchtower
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # --label-enable scopes watchtower to only the cd-etl service above, so
     # it never tries to update itself or any other container on this host.
     # --cleanup removes the superseded image after each update -- without

@@ -123,10 +123,12 @@ resource "aws_iam_role_policy_attachment" "airflow_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# Always resolves to AWS's current AL2023 arm64 build (matching t4g's
-# Graviton architecture) -- no AMI ID goes stale in version control, and
-# what actually matters functionally is the user_data below, not the exact
-# base AMI.
+# Resolves to AWS's current AL2023 arm64 build (matching t4g's Graviton
+# architecture) at first apply -- no AMI ID goes stale in version control.
+# Only read once, though (see the instance's lifecycle.ignore_changes
+# below): re-resolving this on every plan would otherwise show an
+# unprompted instance replacement each time AWS publishes a new build,
+# since `ami` is a ForceNew attribute.
 data "aws_ssm_parameter" "al2023_arm64" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
 }
@@ -153,6 +155,22 @@ resource "aws_instance" "airflow" {
   # user-data edit -- acceptable for a single once-a-day batch job with no
   # live traffic to preserve.
   user_data_replace_on_change = true
+
+  # The secret needs its actual value written before this instance's
+  # user_data can fetch it -- referencing the parent secret's ARN above
+  # doesn't imply that ordering on its own, since aws_instance.airflow and
+  # aws_secretsmanager_secret_version.congress_api_key both only depend on
+  # aws_secretsmanager_secret.congress_api_key, not on each other.
+  depends_on = [aws_secretsmanager_secret_version.congress_api_key]
+
+  # Ignore subsequent AMI changes after first creation -- otherwise every
+  # AWS-published AL2023 arm64 build would show as an unprompted
+  # replacement on a routine `plan`, since `ami` is ForceNew. Bump this
+  # deliberately (temporarily remove the ignore, or taint the instance)
+  # when an AMI update is actually wanted.
+  lifecycle {
+    ignore_changes = [ami]
+  }
 
   # Enforces IMDSv2 (session-token-authenticated instance metadata calls) --
   # the AWS provider defaults http_tokens to "optional", which still allows
