@@ -1,0 +1,85 @@
+#!/bin/bash
+set -euo pipefail
+
+# Docker is the only thing this instance needs installed -- no uv/Python/git.
+# cd-etl's image bundles its own dependencies, DAG code, and migrations
+# (both Airflow's own and cd-etl's alembic ones), applied automatically by
+# its entrypoint on every container start. AL2023 doesn't ship the Compose
+# v2 plugin or AWS CLI v2 by default, so both need installing explicitly.
+dnf install -y docker docker-compose-plugin aws-cli jq
+systemctl enable --now docker
+
+REGION="${aws_region}"
+
+# No static credentials anywhere -- fetched via this instance's own IAM
+# role (see main.tf's aws_iam_role_policy.airflow_instance).
+CONGRESS_API_KEY=$(aws secretsmanager get-secret-value --region "$REGION" \
+  --secret-id "${congress_api_key_secret_arn}" --query SecretString --output text)
+GHCR_PAT=$(aws secretsmanager get-secret-value --region "$REGION" \
+  --secret-id "${ghcr_pat_secret_arn}" --query SecretString --output text)
+RDS_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
+  --secret-id "${rds_master_secret_arn}" --query SecretString --output text)
+RDS_USER=$(echo "$RDS_SECRET" | jq -r .username)
+RDS_PASS=$(echo "$RDS_SECRET" | jq -r .password)
+
+mkdir -p /opt/airflow
+
+# db name here ("cd_platform") matches rds/main.tf's aws_db_instance.this
+# db_name -- NOT local dev's docker-compose.yml, which uses
+# "congressional_app" for the same role (a known, pre-existing naming
+# difference between this repo and cd-platform's local dev).
+cat > /opt/airflow/.env <<EOF
+CONGRESS_API_KEY=$CONGRESS_API_KEY
+AIRFLOW_CONN_CONGRESSIONAL_POSTGRES=postgresql://$${RDS_USER}:$${RDS_PASS}@${rds_address}:5432/cd_platform
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://$${RDS_USER}:$${RDS_PASS}@${rds_address}:5432/${airflow_metadata_db_name}
+EOF
+chmod 600 /opt/airflow/.env
+
+# GHCR isn't IAM-native -- both cd-etl (image pull at container start) and
+# watchtower (every poll) need this login. Persisted to
+# /root/.docker/config.json, bind-mounted read-only into the watchtower
+# container below so it reuses this login instead of re-authenticating.
+echo "$GHCR_PAT" | docker login ghcr.io -u token --password-stdin
+
+cat > /opt/airflow/docker-compose.yml <<EOF
+services:
+  cd-etl:
+    image: ${ghcr_image}:latest
+    restart: unless-stopped
+    env_file: .env
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.docker/config.json:/config.json:ro
+    # --label-enable scopes watchtower to only the cd-etl service above, so
+    # it never tries to update itself or any other container on this host.
+    command: --label-enable --interval 300
+EOF
+
+# Compose's own "restart: unless-stopped" already covers daemon/container
+# crash recovery. This unit's job is specifically to re-run
+# `docker compose up -d` on a full instance reboot.
+cat > /etc/systemd/system/airflow-cd-etl.service <<EOF
+[Unit]
+Description=cd-etl + watchtower (docker compose)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/airflow
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now airflow-cd-etl.service

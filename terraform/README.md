@@ -2,7 +2,7 @@
 
 AWS infrastructure for this repo, provisioned incrementally by component:
 `bootstrap/` (state backend, one-time), `networking/` (#1), `rds/` (#2),
-and eventually `airflow/` (#3), `cd-api/` (#4). See #5 for the overall AWS
+`airflow/` (#3), and eventually `cd-api/` (#4). See #5 for the overall AWS
 deployment tracking issue.
 
 See the root `README.md` for an architecture diagram of the VPC, security
@@ -57,13 +57,11 @@ terraform plan
 terraform apply
 ```
 
-Defaults: `us-west-2`, VPC CIDR `10.0.0.0/16`, 2 AZs. NAT gateway is off
-(`enable_nat_gateway = false`) until #3/#4 actually need outbound internet
-from a private subnet -- flip it on (one shared gateway by default, cheaper
-than one per AZ at the cost of a single point of failure -- see
-`variables.tf` for how to change either) in whichever of those PRs lands
-first. Future `airflow/`/`cd-api/` directories (#3/#4) will read
-this state's outputs
+Defaults: `us-west-2`, VPC CIDR `10.0.0.0/16`, 2 AZs. NAT gateway is on
+(`enable_nat_gateway = true`, one shared gateway rather than one per AZ --
+cheaper, at the cost of a single point of failure -- see `variables.tf` to
+change either) since `airflow/` (#3) needs outbound internet from its
+private subnet. `airflow/`/`cd-api/` (#3/#4) read this state's outputs
 (`vpc_id`, subnet IDs, security group IDs) via `terraform_remote_state`,
 using the same `backend.hcl` pattern with a different `key`.
 
@@ -101,10 +99,73 @@ terraform apply
 **Schema bootstrap is intentionally not part of this directory.** The RDS
 security group only ever accepts connections from the `airflow`/`lambda`
 security groups (#1), so there's no durable way to reach this instance
-until #3's Airflow EC2 instance exists inside the VPC -- #3's own scope
-applies the initial Alembic migration (from `cd-platform`'s `cd-etl`) and
-creates the `airflow_metadata` database as part of its first deploy. Until
-then, this instance is up and encrypted but has no schema.
+until `airflow/`'s EC2 instance exists inside the VPC. `cd-etl`'s own
+schema migrations (`alembic upgrade head`) and Airflow's own metadata
+migrations both run automatically, baked into the `cd-etl` container's
+entrypoint on every start -- no manual step for either. The one exception
+is the sibling `airflow_metadata` database itself, which needs a one-time
+manual `CREATE DATABASE`, covered in `airflow/`'s section below.
+
+## `airflow/` -- self-hosted Airflow on EC2
+
+A small EC2 instance (`t4g.small` by default) running `cd-platform/cd-etl`'s
+Docker image continuously, in `networking/`'s private subnets and `airflow`
+security group. A sidecar `watchtower` container polls GHCR for new
+`cd-etl-vX.X.X` releases and auto-updates -- CI only ever pushes to GHCR,
+never touches this instance directly. Replaces MWAA (originally scoped,
+~$358/mo for one lightweight daily DAG) at ~$6-12/mo for the EC2 instance
+alone.
+
+Like `rds/`, backend config and `networking/`'s state bucket name are
+supplied via gitignored `backend.hcl`/`terraform.tfvars` -- this directory's
+`terraform.tfvars` also needs two sensitive values, `congress_api_key`
+(from [api.congress.gov](https://api.congress.gov/sign-up/)) and `ghcr_pat`
+(a GitHub PAT scoped to `read:packages` only, used to authenticate GHCR
+image pulls):
+
+```bash
+cd terraform/airflow
+cat > backend.hcl <<EOF
+bucket  = "<state_bucket_name from bootstrap output>"
+key     = "airflow/terraform.tfstate"
+region  = "us-west-2"
+encrypt = true
+EOF
+cat > terraform.tfvars <<EOF
+state_bucket_name = "<state_bucket_name from bootstrap output>"
+congress_api_key  = "<your api.congress.gov key>"
+ghcr_pat          = "<GitHub PAT, read:packages scope only>"
+EOF
+
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+```
+
+**The one-time `CREATE DATABASE airflow_metadata;` step is manual, not
+Terraform-managed** (mirrors `rds/`'s own precedent of leaving schema
+bootstrap out of Terraform) -- RDS has no `docker-entrypoint-initdb.d`
+equivalent to create this sibling database automatically, and this
+instance is the only thing that can reach RDS at all (per its security
+group). Run it once, right after `terraform apply`, via an SSM shell
+session (see below) -- `cd-etl`'s container will fail to start (its
+entrypoint's `airflow db migrate` needs that database to exist) until this
+step is done.
+
+**The Airflow UI (port 8080) has no public ingress, ever** -- access it via
+SSM Session Manager port-forwarding, not a VPN (a VPN's per-subnet-
+association billing alone would dwarf this project's entire AWS spend for
+occasional admin access to one DAG's UI):
+
+```bash
+# Shell session (e.g. for the one-time CREATE DATABASE step, or `docker logs`):
+aws ssm start-session --target "$(terraform output -raw instance_id)"
+
+# Port-forward the Airflow UI to localhost:8080:
+aws ssm start-session --target "$(terraform output -raw instance_id)" \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+```
 
 ## Validating without AWS credentials
 

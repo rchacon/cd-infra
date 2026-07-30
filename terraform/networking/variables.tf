@@ -33,7 +33,7 @@ variable "single_nat_gateway" {
 }
 
 variable "enable_nat_gateway" {
-  description = "Provision NAT gateway(s) for the private subnets. Off by default -- nothing needs outbound internet from a private subnet until #2/#3/#4 (RDS, the Airflow EC2 instance, cd-api's Lambda) actually exist, so this stays false until whichever of those lands first."
+  description = "Provision NAT gateway(s) for the private subnets. On by default -- #3's Airflow EC2 instance needs outbound internet (GHCR image pulls, package installs, SSM) from its private subnet."
   type        = bool
-  default     = false
+  default     = true
 }
