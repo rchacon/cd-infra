@@ -118,10 +118,10 @@ alone.
 
 Like `rds/`, backend config and `networking/`'s state bucket name are
 supplied via gitignored `backend.hcl`/`terraform.tfvars` -- this directory's
-`terraform.tfvars` also needs two sensitive values, `congress_api_key`
-(from [api.congress.gov](https://api.congress.gov/sign-up/)) and `ghcr_pat`
-(a GitHub PAT scoped to `read:packages` only, used to authenticate GHCR
-image pulls):
+`terraform.tfvars` also needs one sensitive value, `congress_api_key` (from
+[api.congress.gov](https://api.congress.gov/sign-up/)). No GitHub PAT is
+needed: `cd-etl`'s GHCR package is public, so both its image pull and
+watchtower's polling work anonymously.
 
 ```bash
 cd terraform/airflow
@@ -134,7 +134,6 @@ EOF
 cat > terraform.tfvars <<EOF
 state_bucket_name = "<state_bucket_name from bootstrap output>"
 congress_api_key  = "<your api.congress.gov key>"
-ghcr_pat          = "<GitHub PAT, read:packages scope only>"
 EOF
 
 terraform init -backend-config=backend.hcl

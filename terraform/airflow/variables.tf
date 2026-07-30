@@ -33,12 +33,6 @@ variable "congress_api_key" {
   sensitive   = true
 }
 
-variable "ghcr_pat" {
-  description = "GitHub Personal Access Token scoped to `read:packages` only, used to authenticate GHCR image pulls (both cd-etl's and watchtower's). Stored in Secrets Manager and fetched by the instance at boot."
-  type        = string
-  sensitive   = true
-}
-
 variable "airflow_metadata_db_name" {
   description = "Name of the sibling database on RDS holding Airflow's own metadata (matches local dev's docker-compose.yml). Created once manually via `CREATE DATABASE` -- RDS has no docker-entrypoint-initdb.d equivalent -- see terraform/README.md."
   type        = string

@@ -15,8 +15,6 @@ REGION="${aws_region}"
 # role (see main.tf's aws_iam_role_policy.airflow_instance).
 CONGRESS_API_KEY=$(aws secretsmanager get-secret-value --region "$REGION" \
   --secret-id "${congress_api_key_secret_arn}" --query SecretString --output text)
-GHCR_PAT=$(aws secretsmanager get-secret-value --region "$REGION" \
-  --secret-id "${ghcr_pat_secret_arn}" --query SecretString --output text)
 RDS_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
   --secret-id "${rds_master_secret_arn}" --query SecretString --output text)
 RDS_USER=$(echo "$RDS_SECRET" | jq -r .username)
@@ -35,12 +33,8 @@ AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://$${RDS_USER}:$${RDS_PA
 EOF
 chmod 600 /opt/airflow/.env
 
-# GHCR isn't IAM-native -- both cd-etl (image pull at container start) and
-# watchtower (every poll) need this login. Persisted to
-# /root/.docker/config.json, bind-mounted read-only into the watchtower
-# container below so it reuses this login instead of re-authenticating.
-echo "$GHCR_PAT" | docker login ghcr.io -u token --password-stdin
-
+# cd-etl's GHCR package is public, so both cd-etl's image pull and
+# watchtower's polling work anonymously -- no docker login/PAT needed.
 cat > /opt/airflow/docker-compose.yml <<EOF
 services:
   cd-etl:
@@ -59,7 +53,6 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /root/.docker/config.json:/config.json:ro
     # --label-enable scopes watchtower to only the cd-etl service above, so
     # it never tries to update itself or any other container on this host.
     # --cleanup removes the superseded image after each update -- without

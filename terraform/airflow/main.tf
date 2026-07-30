@@ -17,12 +17,12 @@ data "terraform_remote_state" "rds" {
 }
 
 # Customer-managed key (rather than the AWS-managed default) so reading
-# CONGRESS_API_KEY/the GHCR PAT requires both Secrets Manager access *and*
-# kms:Decrypt on this specific key -- same defense-in-depth reasoning as
+# CONGRESS_API_KEY requires both Secrets Manager access *and* kms:Decrypt
+# on this specific key -- same defense-in-depth reasoning as
 # ../bootstrap's state-bucket key and ../rds's storage key, and the same
 # flat ~$1/mo.
 resource "aws_kms_key" "airflow" {
-  description             = "Encrypts CONGRESS_API_KEY and the GHCR PAT in Secrets Manager."
+  description             = "Encrypts CONGRESS_API_KEY in Secrets Manager."
   deletion_window_in_days = 30
   enable_key_rotation     = true
 }
@@ -44,20 +44,6 @@ resource "aws_secretsmanager_secret" "congress_api_key" {
 resource "aws_secretsmanager_secret_version" "congress_api_key" {
   secret_id     = aws_secretsmanager_secret.congress_api_key.id
   secret_string = var.congress_api_key
-}
-
-resource "aws_secretsmanager_secret" "ghcr_pat" {
-  name       = "cd-platform/airflow/ghcr-pat"
-  kms_key_id = aws_kms_key.airflow.arn
-
-  tags = {
-    Project = "cd-platform"
-  }
-}
-
-resource "aws_secretsmanager_secret_version" "ghcr_pat" {
-  secret_id     = aws_secretsmanager_secret.ghcr_pat.id
-  secret_string = var.ghcr_pat
 }
 
 data "aws_iam_policy_document" "airflow_assume_role" {
@@ -95,7 +81,6 @@ data "aws_iam_policy_document" "airflow_instance" {
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
       aws_secretsmanager_secret.congress_api_key.arn,
-      aws_secretsmanager_secret.ghcr_pat.arn,
       data.terraform_remote_state.rds.outputs.master_user_secret_arn,
     ]
   }
@@ -154,7 +139,6 @@ resource "aws_instance" "airflow" {
   user_data = templatefile("${path.module}/templates/user-data.sh.tftpl", {
     aws_region                  = var.aws_region
     congress_api_key_secret_arn = aws_secretsmanager_secret.congress_api_key.arn
-    ghcr_pat_secret_arn         = aws_secretsmanager_secret.ghcr_pat.arn
     rds_master_secret_arn       = data.terraform_remote_state.rds.outputs.master_user_secret_arn
     rds_address                 = data.terraform_remote_state.rds.outputs.rds_address
     airflow_metadata_db_name    = var.airflow_metadata_db_name
