@@ -38,6 +38,8 @@ PRs are merged with a merge commit (`gh pr merge --merge`), not squash or rebase
 
 When addressing review comments on an open PR, break the fixes up into separate commits along logical lines (one commit per distinct issue/fix, not one commit for everything) rather than a single catch-all commit, and reply to each review comment on GitHub referencing the specific commit hash that addressed it (e.g. "Fixed in `abc1234`.") -- keeps the review thread traceable to the exact change that resolved it, rather than a generic "addressed" reply pointing at the whole PR.
 
+When *submitting* a code review on a PR, post each finding as its own separate inline review comment (anchored to the specific file/line via `gh api repos/{owner}/{repo}/pulls/{number}/comments`, not a single bundled `gh pr comment`) -- a combined comment listing every finding only supports one flat reply thread, making it impossible to reply to (or resolve) individual findings separately later.
+
 ## Commands
 
 See `terraform/README.md` for the full per-directory setup (backend.hcl/terraform.tfvars generation, init/plan/apply). Quick reference, validating without AWS credentials (same checks CI runs):
