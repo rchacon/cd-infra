@@ -34,7 +34,9 @@ With `enable_nat_gateway = true` (current default, since `airflow/`), the runnin
 
 ## Git conventions
 
-PRs are merged with a merge commit (`gh pr merge --merge`), not squash or rebase -- preserves the individual commit history from the PR branch.
+PRs are merged with a merge commit (`gh pr merge --merge`), not squash or rebase -- preserves the individual commit history from the PR branch. After merging, delete the branch both locally and remotely (`gh pr merge --merge --delete-branch` does both in one step).
+
+When addressing review comments on an open PR, break the fixes up into separate commits along logical lines (one commit per distinct issue/fix, not one commit for everything) rather than a single catch-all commit, and reply to each review comment on GitHub referencing the specific commit hash that addressed it (e.g. "Fixed in `abc1234`.") -- keeps the review thread traceable to the exact change that resolved it, rather than a generic "addressed" reply pointing at the whole PR.
 
 ## Commands
 
