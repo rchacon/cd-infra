@@ -62,7 +62,10 @@ services:
       - /root/.docker/config.json:/config.json:ro
     # --label-enable scopes watchtower to only the cd-etl service above, so
     # it never tries to update itself or any other container on this host.
-    command: --label-enable --interval 300
+    # --cleanup removes the superseded image after each update -- without
+    # it, old cd-etl layers accumulate indefinitely on this instance's
+    # small (AMI-default) root volume.
+    command: --label-enable --cleanup --interval 300
 EOF
 
 # Compose's own "restart: unless-stopped" already covers daemon/container
