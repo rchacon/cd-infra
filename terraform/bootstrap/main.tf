@@ -86,4 +86,13 @@ resource "aws_s3_bucket_public_access_block" "terraform_state" {
 resource "aws_iam_openid_connect_provider" "github_actions" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
+
+  # Confirmed on a real apply: Terraform's schema requires a scheme in
+  # `url` (validation rejects a bare hostname), but AWS strips it and
+  # returns the bare hostname on read regardless -- this provider version
+  # doesn't suppress that diff, causing a perpetual (and pointless, since
+  # nothing depends on this resource) destroy/recreate plan without this.
+  lifecycle {
+    ignore_changes = [url]
+  }
 }
