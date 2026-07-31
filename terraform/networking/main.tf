@@ -105,6 +105,20 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_lambda" {
   referenced_security_group_id = aws_security_group.lambda.id
 }
 
+# #4's RDS Proxy reuses this same lambda SG (rather than a new dedicated
+# one) so the rds_from_lambda rule above already covers proxy->RDS traffic
+# -- but custom (non-default) security groups don't implicitly allow
+# same-SG traffic, so Lambda->Proxy still needs this explicit
+# self-referencing rule.
+resource "aws_vpc_security_group_ingress_rule" "lambda_from_lambda" {
+  security_group_id            = aws_security_group.lambda.id
+  description                  = "Postgres to RDS Proxy, from cd-api Lambda itself (same SG)"
+  from_port                    = local.postgres_port
+  to_port                      = local.postgres_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.lambda.id
+}
+
 # rds has no egress rules at all: it only responds to the inbound
 # connections allowed above (security groups are stateful, so return
 # traffic doesn't need its own rule) and doesn't itself initiate outbound

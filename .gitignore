@@ -20,3 +20,4 @@ override.tf.json
 .terraformrc
 terraform.rc
 terraform/*/backend.hcl
+terraform/cd-api/files/
