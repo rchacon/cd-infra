@@ -171,8 +171,15 @@ data "archive_file" "placeholder" {
   type        = "zip"
   output_path = "${path.module}/files/placeholder.zip"
 
+  # Nested under src/, matching cd-platform's actual cd-api/src/app.py
+  # layout (confirmed against cd-platform#29's own description: deploy
+  # installs dependencies "alongside src/", not flattening it away) --
+  # this has to match the real deploy's structure, or the handler config
+  # below would be right for the real code but wrong for this placeholder
+  # (or vice versa), breaking the plan's own "aws lambda invoke against the
+  # placeholder confirms wiring" verification step.
   source {
-    filename = "app.py"
+    filename = "src/app.py"
     content  = <<-PY
       def handler(event, context):
           return {"statusCode": 200, "body": "cd-api placeholder -- see cd-platform#29 for the real deploy"}
@@ -232,8 +239,12 @@ resource "aws_iam_role_policy" "lambda_kms" {
 resource "aws_lambda_function" "cd_api" {
   function_name = "cd-platform-cd-api"
   role          = aws_iam_role.lambda.arn
-  handler       = "app.handler"
-  runtime       = "python3.12"
+  # cd-platform/cd-api/src/app.py's `handler = Mangum(app)`, per its own
+  # src/-nested layout (see cd-platform#29 and the archive_file comment
+  # above) -- not "app.handler". A wrong module path here fails cold start
+  # with "Unable to import module" once cd-platform#29 ships the real zip.
+  handler = "src.app.handler"
+  runtime = "python3.12"
 
   filename         = data.archive_file.placeholder.output_path
   source_code_hash = data.archive_file.placeholder.output_base64sha256

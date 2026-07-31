@@ -154,3 +154,17 @@ resource "aws_vpc_security_group_egress_rule" "lambda_to_rds" {
   ip_protocol                  = "tcp"
   referenced_security_group_id = aws_security_group.rds.id
 }
+
+# Egress counterpart to lambda_from_lambda's ingress rule above -- egress
+# is evaluated on the traffic's source and ingress on its destination
+# independently, so sharing one SG between Lambda and #4's RDS Proxy
+# doesn't implicitly cover both directions; each needs its own explicit
+# self-referencing rule.
+resource "aws_vpc_security_group_egress_rule" "lambda_to_lambda" {
+  security_group_id            = aws_security_group.lambda.id
+  description                  = "Postgres to RDS Proxy, from cd-api Lambda itself (same SG)"
+  from_port                    = local.postgres_port
+  to_port                      = local.postgres_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.lambda.id
+}

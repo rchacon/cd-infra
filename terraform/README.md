@@ -214,8 +214,17 @@ terraform apply
 **The `cd_api_app` database role is bootstrapped manually, not by
 Terraform** (mirrors `rds/`'s and `airflow/`'s own precedent) -- Lambda has
 no "runs once at boot" hook the way EC2's `user-data` does, and building
-one would mean adding actual `cd-api` app code just for this. Run once,
-right after `terraform apply`, from a directory holding both this and
+one would mean adding actual `cd-api` app code just for this. Unlike
+`airflow/`'s `cd_etl_app` (which owns the tables it creates via its own
+migrations), `cd_api_app` is a read-only *consumer* of tables `cd_etl_app`
+owns -- `cd-api` never writes (confirmed against `cd-api/src/db.py`: one
+`SELECT`, nothing else), so its grants are `SELECT`-only, and since
+database/schema-level grants don't cascade to another role's existing
+tables, it needs an explicit `GRANT SELECT ON ALL TABLES` plus
+`ALTER DEFAULT PRIVILEGES FOR ROLE cd_etl_app` so tables `cd_etl_app`
+creates *later* (future migrations) are covered too, not just the ones
+that already exist at bootstrap time. Run once, right after
+`terraform apply`, from a directory holding both this and
 `../rds`/`../airflow`'s outputs:
 
 ```bash
@@ -239,8 +248,10 @@ psql -h ${RDS_ADDRESS} -U "\$RDS_USER" -d cd_platform -v ON_ERROR_STOP=1 <<-SQL
 SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', 'cd_api_app', '${CD_API_APP_PASSWORD}')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'cd_api_app')\\gexec
 ALTER ROLE "cd_api_app" WITH PASSWORD '${CD_API_APP_PASSWORD}';
-GRANT ALL PRIVILEGES ON DATABASE "cd_platform" TO "cd_api_app";
-GRANT ALL ON SCHEMA public TO "cd_api_app";
+GRANT CONNECT ON DATABASE "cd_platform" TO "cd_api_app";
+GRANT USAGE ON SCHEMA public TO "cd_api_app";
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO "cd_api_app";
+ALTER DEFAULT PRIVILEGES FOR ROLE cd_etl_app IN SCHEMA public GRANT SELECT ON TABLES TO "cd_api_app";
 SQL
 SCRIPT
 
