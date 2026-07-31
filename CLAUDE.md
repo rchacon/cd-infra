@@ -26,7 +26,7 @@ The `cd-terraform` IAM user's policy is hand-managed in the AWS Console (not Ter
 
 ## Cost
 
-With `enable_nat_gateway = true` (current default, since `airflow/`), the running total is roughly: `bootstrap/`'s KMS key (~$1/mo) + `rds/`'s KMS key (~$1/mo) + the `db.t4g.micro`/20GiB gp3 RDS instance (~$12-15/mo) + the single shared NAT gateway (~$32-33/mo) + `airflow/`'s KMS key (~$1/mo) + its `t4g.small` EC2 instance (~$12/mo). VPC/subnets/route tables/IGW/security groups are free.
+With `enable_nat_gateway = true` (current default, since `airflow/`), the running total is roughly: `bootstrap/`'s KMS key (~$1/mo) + `rds/`'s KMS key (~$1/mo) + the `db.t4g.micro`/20GiB gp3 RDS instance (~$12-15/mo) + the single shared NAT gateway (~$32-33/mo) + `airflow/`'s KMS key (~$1/mo) + its `t3.small` EC2 instance (~$15/mo, x86_64 -- cd-etl's GHCR image is amd64-only). VPC/subnets/route tables/IGW/security groups are free.
 
 ## Standing agreement on `terraform apply`
 

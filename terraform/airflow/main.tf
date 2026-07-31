@@ -157,18 +157,25 @@ resource "aws_iam_role_policy_attachment" "airflow_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# Resolves to AWS's current AL2023 arm64 build (matching t4g's Graviton
-# architecture) at first apply -- no AMI ID goes stale in version control.
-# Only read once, though (see the instance's lifecycle.ignore_changes
-# below): re-resolving this on every plan would otherwise show an
-# unprompted instance replacement each time AWS publishes a new build,
-# since `ami` is a ForceNew attribute.
-data "aws_ssm_parameter" "al2023_arm64" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+# x86_64, not arm64/Graviton -- confirmed on a real deploy that cd-etl's
+# GHCR image is amd64-only (cd-platform's cd-etl-deploy.yml builds on
+# ubuntu-latest with no `platforms:` set, so it only ever produces
+# linux/amd64), and Docker won't run a mismatched-architecture image
+# without QEMU emulation set up, which this instance doesn't have. Not
+# worth making cd-platform's build multi-arch just to reclaim Graviton's
+# ~$3/mo edge on a single small instance.
+#
+# Resolves to AWS's current AL2023 x86_64 build at first apply -- no AMI ID
+# goes stale in version control. Only read once, though (see the
+# instance's lifecycle.ignore_changes below): re-resolving this on every
+# plan would otherwise show an unprompted instance replacement each time
+# AWS publishes a new build, since `ami` is a ForceNew attribute.
+data "aws_ssm_parameter" "al2023_x86_64" {
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
 
 resource "aws_instance" "airflow" {
-  ami                    = data.aws_ssm_parameter.al2023_arm64.value
+  ami                    = data.aws_ssm_parameter.al2023_x86_64.value
   instance_type          = var.instance_type
   subnet_id              = data.terraform_remote_state.networking.outputs.private_subnet_ids[0]
   vpc_security_group_ids = [data.terraform_remote_state.networking.outputs.airflow_security_group_id]

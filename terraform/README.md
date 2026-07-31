@@ -108,7 +108,8 @@ manual `CREATE DATABASE`, covered in `airflow/`'s section below.
 
 ## `airflow/` -- self-hosted Airflow on EC2
 
-A small EC2 instance (`t4g.small` by default) running `cd-platform/cd-etl`'s
+A small EC2 instance (`t3.small` by default, x86_64 -- cd-etl's GHCR image is
+amd64-only) running `cd-platform/cd-etl`'s
 Docker image continuously, in `networking/`'s private subnets and `airflow`
 security group. A sidecar `watchtower` container polls GHCR for new
 `cd-etl-vX.X.X` releases and auto-updates -- CI only ever pushes to GHCR,

@@ -16,9 +16,9 @@ variable "state_bucket_name" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type running cd-etl + watchtower. t4g.small by default -- Airflow's webserver/scheduler/triggerer all run in one `airflow standalone` process, heavier than t4g.micro's 1GiB comfortably handles; try t4g.micro later if it proves sufficient (~$6/mo vs ~$12/mo)."
+  description = "EC2 instance type running cd-etl + watchtower. x86_64 (t3.small), not arm64/Graviton -- cd-etl's GHCR image is amd64-only (confirmed on a real deploy), and this instance's AMI lookup (see main.tf) matches. t3.small by default -- Airflow's webserver/scheduler/triggerer all run in one `airflow standalone` process, heavier than t3.micro's 1GiB comfortably handles; try t3.micro later if it proves sufficient (~$7.50/mo vs ~$15/mo)."
   type        = string
-  default     = "t4g.small"
+  default     = "t3.small"
 }
 
 variable "github_repository_owner" {

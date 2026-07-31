@@ -18,7 +18,8 @@ systemctl enable --now docker
 # command would have installed either). Compose v2 isn't in AL2023's repos
 # under any name, so install it the way AWS's own docs do: download the
 # CLI plugin binary directly from its GitHub release, matching this
-# instance's architecture (aarch64, since it's a t4g/Graviton instance).
+# instance's architecture via `uname -m` (x86_64 -- see main.tf's AMI/
+# instance_type comments for why this isn't arm64/Graviton).
 mkdir -p /usr/libexec/docker/cli-plugins
 curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
   -o /usr/libexec/docker/cli-plugins/docker-compose
