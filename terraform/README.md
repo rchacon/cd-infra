@@ -223,9 +223,13 @@ database/schema-level grants don't cascade to another role's existing
 tables, it needs an explicit `GRANT SELECT ON ALL TABLES` plus
 `ALTER DEFAULT PRIVILEGES FOR ROLE cd_etl_app` so tables `cd_etl_app`
 creates *later* (future migrations) are covered too, not just the ones
-that already exist at bootstrap time. Run once, right after
-`terraform apply`, from a directory holding both this and
-`../rds`/`../airflow`'s outputs:
+that already exist at bootstrap time. `ALTER DEFAULT PRIVILEGES FOR ROLE`
+can only be run by that role itself or a member of it -- confirmed on a
+real apply that even RDS's master user (`rds_superuser`, not a true
+Postgres `SUPERUSER`) needs an explicit `GRANT "cd_etl_app" TO` itself
+first, or it fails with `permission denied to change default privileges`.
+Run once, right after `terraform apply`, from a directory holding both
+this and `../rds`/`../airflow`'s outputs:
 
 ```bash
 CD_API_APP_PASSWORD="$(terraform output -raw cd_api_app_db_password)"
@@ -251,6 +255,7 @@ ALTER ROLE "cd_api_app" WITH PASSWORD '${CD_API_APP_PASSWORD}';
 GRANT CONNECT ON DATABASE "cd_platform" TO "cd_api_app";
 GRANT USAGE ON SCHEMA public TO "cd_api_app";
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO "cd_api_app";
+GRANT "cd_etl_app" TO "\$RDS_USER";
 ALTER DEFAULT PRIVILEGES FOR ROLE cd_etl_app IN SCHEMA public GRANT SELECT ON TABLES TO "cd_api_app";
 SQL
 SCRIPT
