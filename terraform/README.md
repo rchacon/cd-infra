@@ -287,6 +287,61 @@ that workflow assumes); the real `cd-api` code arrives via
 `aws lambda update-function-code` from that separate repo's pipeline, not
 from a `terraform apply` here.
 
+### Rotating an API Gateway API key
+
+`var.api_key_names` is a list specifically so rotation is a plain Terraform
+change -- no manual console work, no `terraform import`, and zero downtime.
+`aws_api_gateway_api_key`'s `value` attribute is sensitive in the AWS
+provider, so `terraform plan`/`apply` output never shows the plaintext
+value even if someone else runs it on your behalf -- the only step below
+that touches the real value is step 3, and it has to be run somewhere
+private (not piped through a shared session/chat).
+
+1. Add a new, distinct key name alongside the existing one(s) in
+   `terraform.tfvars` (a dated suffix keeps rotation history
+   self-documenting):
+
+   ```hcl
+   api_key_names = ["self", "self-2026-08"]
+   ```
+
+2. Plan and apply -- expect exactly one new `aws_api_gateway_api_key` +
+   one new `aws_api_gateway_usage_plan_key`, nothing else changing:
+
+   ```bash
+   cd terraform/cd-api
+   terraform plan
+   terraform apply
+   ```
+
+3. Fetch the new key's value **privately** -- this is the only step that
+   ever touches the plaintext. Either the AWS Console (API Gateway -> API
+   Keys -> the new key -> "Show"), or:
+
+   ```bash
+   aws apigateway get-api-key --api-key <new-key-id> --include-value
+   ```
+
+   run in a terminal that isn't a shared/logged session.
+
+4. Cut over whatever client/integration was using the old key to the new
+   value. The old key keeps working throughout this step -- no downtime.
+
+5. Once the cutover is confirmed working, remove the old name from
+   `terraform.tfvars`:
+
+   ```hcl
+   api_key_names = ["self-2026-08"]
+   ```
+
+6. Plan and apply again -- expect exactly one `aws_api_gateway_api_key` +
+   one `aws_api_gateway_usage_plan_key` being destroyed (the retired key):
+
+   ```bash
+   terraform plan
+   terraform apply
+   ```
+
 ## Validating without AWS credentials
 
 `terraform fmt -check -recursive` and `terraform validate` (after
