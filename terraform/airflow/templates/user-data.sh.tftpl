@@ -4,16 +4,25 @@ set -euo pipefail
 # Docker is the only thing this instance needs installed -- no uv/Python/git.
 # cd-etl's image bundles its own dependencies, DAG code, and migrations
 # (both Airflow's own and cd-etl's alembic ones), applied automatically by
-# its entrypoint on every container start. AL2023 doesn't ship the Compose
-# v2 plugin by default, so it needs installing explicitly -- the AWS CLI
-# v2 is already preinstalled on the AL2023 base AMI, so it's not in this
-# list (there's no "aws-cli" dnf package on AL2023 to install it from).
-# postgresql16 (matching rds/'s engine_version) provides the psql client
-# used by the one-time bootstrap below -- unverified against a real AL2023
-# boot as of this writing (see the aws-cli lesson elsewhere in this file);
-# confirm this package name resolves on the first real apply.
-dnf install -y docker docker-compose-plugin jq postgresql16
+# its entrypoint on every container start. The AWS CLI v2 is already
+# preinstalled on the AL2023 base AMI, so it's not in this list (there's no
+# "aws-cli" dnf package on AL2023 to install it from). postgresql16
+# (matching rds/'s engine_version) provides the psql client used by the
+# one-time bootstrap below -- confirmed present in AL2023's default repos.
+dnf install -y docker jq postgresql16
 systemctl enable --now docker
+
+# AL2023 has no "docker-compose-plugin" dnf package at all (confirmed --
+# `dnf install` fails outright on that name, which as a bonus confirms dnf
+# treats a multi-package install as all-or-nothing: nothing else in that
+# command would have installed either). Compose v2 isn't in AL2023's repos
+# under any name, so install it the way AWS's own docs do: download the
+# CLI plugin binary directly from its GitHub release, matching this
+# instance's architecture (aarch64, since it's a t4g/Graviton instance).
+mkdir -p /usr/libexec/docker/cli-plugins
+curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
+  -o /usr/libexec/docker/cli-plugins/docker-compose
+chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 
 REGION="${aws_region}"
 
