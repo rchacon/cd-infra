@@ -83,8 +83,24 @@ mkdir -p /opt/airflow
 # "congressional_app" for the same role (a known, pre-existing naming
 # difference between this repo and cd-platform's local dev). Connects as
 # the scoped role created above, never the RDS master user.
+#
+# PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE are for cd-etl's own alembic
+# migration (migrations/env.py's libpq-convention _db_url(), run
+# automatically by entrypoint.sh before anything else starts) -- a
+# completely separate connection mechanism from the Airflow-native
+# AIRFLOW_CONN_CONGRESSIONAL_POSTGRES URI below, which only the DAG's own
+# PostgresHook calls use. Local dev only overrides PGHOST because its
+# Postgres container's user/password/dbname happen to match env.py's
+# defaults (postgres/postgres/congressional_app) exactly -- confirmed on a
+# real deploy that skipping these here leaves alembic trying to connect to
+# "localhost", not RDS, since none of our values match those defaults.
 cat > /opt/airflow/.env <<EOF
 CONGRESS_API_KEY=$CONGRESS_API_KEY
+PGHOST=${rds_address}
+PGPORT=5432
+PGUSER=$CD_ETL_APP_USER
+PGPASSWORD=$CD_ETL_APP_PASS
+PGDATABASE=cd_platform
 AIRFLOW_CONN_CONGRESSIONAL_POSTGRES=postgresql://$${CD_ETL_APP_USER_ENC}:$${CD_ETL_APP_PASS_ENC}@${rds_address}:5432/cd_platform
 AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://$${CD_ETL_APP_USER_ENC}:$${CD_ETL_APP_PASS_ENC}@${rds_address}:5432/${airflow_metadata_db_name}
 EOF
