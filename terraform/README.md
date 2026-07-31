@@ -2,8 +2,8 @@
 
 AWS infrastructure for this repo, provisioned incrementally by component:
 `bootstrap/` (state backend, one-time), `networking/` (#1), `rds/` (#2),
-`airflow/` (#3), and eventually `cd-api/` (#4). See #5 for the overall AWS
-deployment tracking issue.
+`airflow/` (#3), `cd-api/` (#4). See #5 for the overall AWS deployment
+tracking issue.
 
 See the root `README.md` for an architecture diagram of the VPC, security
 groups, and planned compute resources.
@@ -32,7 +32,13 @@ terraform output
 
 Note the `state_bucket_name` output -- every other `terraform/*` directory's
 backend needs it (see below). This directory isn't touched again as part of
-normal workflow once it's applied.
+normal workflow once it's applied -- **the one deliberate exception is
+`cd-api/` (#4)'s GitHub OIDC provider**, an account-wide singleton added
+here later for the same reason the state bucket is. Re-apply this
+directory once (from whichever machine holds its local `terraform.tfstate`
+-- there's no S3 backend to apply it from elsewhere) to pick that up, then
+note the new `github_oidc_provider_arn` output for `cd-api/`'s
+`terraform.tfvars` (see below).
 
 ## `networking/` -- VPC, subnets, security groups
 
@@ -167,6 +173,119 @@ aws ssm start-session --target "$(terraform output -raw instance_id)" \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
 ```
+
+## `cd-api/` -- Lambda + API Gateway
+
+Runs `cd-platform/cd-api` (a FastAPI app, already Lambda-ready via
+`handler = Mangum(app)`) on Lambda behind an API Gateway REST API, in
+`networking/`'s private subnets and `lambda` security group. RDS Proxy
+sits between Lambda and RDS (`aws_db_proxy`, reusing the `lambda` security
+group) so Lambda's per-invocation connection model can't exhaust RDS's
+`max_connections` -- Lambda connects to the proxy with plain
+`PGHOST`/`PGUSER`/`PGPASSWORD` env vars (`SECRETS` auth mode), so
+`cd-api/src/db.py` needs no code change at all. Auth is a static API
+Gateway API key (`var.api_key_names`, one shared usage plan) -- a
+deliberate MVP stopgap per `cd-platform#13`, replaced later by that
+issue's real per-customer system.
+
+**This directory needs `bootstrap/`'s new `github_oidc_provider_arn`
+output** (see above) copied manually into its `terraform.tfvars` --
+`bootstrap/` has no S3 backend, so this can't flow through
+`terraform_remote_state` like `networking/`'s or `rds/`'s outputs do.
+
+```bash
+cd terraform/cd-api
+cat > backend.hcl <<EOF
+bucket  = "<state_bucket_name from bootstrap output>"
+key     = "cd-api/terraform.tfstate"
+region  = "us-west-2"
+encrypt = true
+EOF
+cat > terraform.tfvars <<EOF
+state_bucket_name        = "<state_bucket_name from bootstrap output>"
+github_oidc_provider_arn = "<github_oidc_provider_arn from bootstrap output>"
+EOF
+
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+```
+
+**The `cd_api_app` database role is bootstrapped manually, not by
+Terraform** (mirrors `rds/`'s and `airflow/`'s own precedent) -- Lambda has
+no "runs once at boot" hook the way EC2's `user-data` does, and building
+one would mean adding actual `cd-api` app code just for this. Unlike
+`airflow/`'s `cd_etl_app` (which owns the tables it creates via its own
+migrations), `cd_api_app` is a read-only *consumer* of tables `cd_etl_app`
+owns -- `cd-api` never writes (confirmed against `cd-api/src/db.py`: one
+`SELECT`, nothing else), so its grants are `SELECT`-only, and since
+database/schema-level grants don't cascade to another role's existing
+tables, it needs an explicit `GRANT SELECT ON ALL TABLES` plus
+`ALTER DEFAULT PRIVILEGES FOR ROLE cd_etl_app` so tables `cd_etl_app`
+creates *later* (future migrations) are covered too, not just the ones
+that already exist at bootstrap time. `ALTER DEFAULT PRIVILEGES FOR ROLE`
+can only be run by that role itself or a member of it -- confirmed on a
+real apply that even RDS's master user (`rds_superuser`, not a true
+Postgres `SUPERUSER`) needs an explicit `GRANT "cd_etl_app" TO` itself
+first, or it fails with `permission denied to change default privileges`.
+Run once, right after `terraform apply`, from a directory holding both
+this and `../rds`/`../airflow`'s outputs:
+
+```bash
+CD_API_APP_PASSWORD="$(terraform output -raw cd_api_app_db_password)"
+RDS_SECRET_ARN="$(terraform -chdir=../rds output -raw master_user_secret_arn)"
+RDS_ADDRESS="$(terraform -chdir=../rds output -raw rds_address)"
+AIRFLOW_INSTANCE_ID="$(terraform -chdir=../airflow output -raw instance_id)"
+
+# Write the bootstrap script locally, with the values above already
+# substituted in -- avoids nesting shell-quoting through SSM's own JSON
+# parameter encoding. Same idempotent \gexec pattern airflow/'s bootstrap
+# already validated works (sidesteps bash expanding an unescaped `$$` in a
+# heredoc to its own PID, which would corrupt Postgres's DO $$ ... $$
+# dollar-quoting).
+cat > /tmp/cd-api-db-bootstrap.sh <<SCRIPT
+RDS_SECRET=\$(aws secretsmanager get-secret-value --query SecretString --output text --secret-id ${RDS_SECRET_ARN})
+RDS_USER=\$(echo "\$RDS_SECRET" | jq -r .username)
+RDS_PASS=\$(echo "\$RDS_SECRET" | jq -r .password)
+export PGPASSWORD="\$RDS_PASS"
+psql -h ${RDS_ADDRESS} -U "\$RDS_USER" -d cd_platform -v ON_ERROR_STOP=1 <<-SQL
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', 'cd_api_app', '${CD_API_APP_PASSWORD}')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'cd_api_app')\\gexec
+ALTER ROLE "cd_api_app" WITH PASSWORD '${CD_API_APP_PASSWORD}';
+GRANT CONNECT ON DATABASE "cd_platform" TO "cd_api_app";
+GRANT USAGE ON SCHEMA public TO "cd_api_app";
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO "cd_api_app";
+GRANT "cd_etl_app" TO "\$RDS_USER";
+ALTER DEFAULT PRIVILEGES FOR ROLE cd_etl_app IN SCHEMA public GRANT SELECT ON TABLES TO "cd_api_app";
+SQL
+SCRIPT
+
+# jq turns the script's lines into the JSON array send-command expects,
+# rather than hand-nesting shell escaping inside a JSON string.
+jq -Rsc '{commands: (split("\n") | map(select(length > 0)))}' \
+  /tmp/cd-api-db-bootstrap.sh > /tmp/cd-api-db-bootstrap-params.json
+
+aws ssm send-command \
+  --instance-ids "$AIRFLOW_INSTANCE_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters file:///tmp/cd-api-db-bootstrap-params.json
+# Confirm with: aws ssm get-command-invocation --command-id <id> --instance-id "$AIRFLOW_INSTANCE_ID"
+
+rm /tmp/cd-api-db-bootstrap.sh /tmp/cd-api-db-bootstrap-params.json
+unset CD_API_APP_PASSWORD
+```
+
+Both temp files contain the plaintext password -- delete them once
+confirmed. The password also transiently appears in SSM's command history
+for this one-time step -- accepted, same as reading it requires its own
+IAM grant few identities have.
+
+**The Lambda ships with a placeholder body until `cd-platform#29`'s deploy
+workflow runs at least once** -- this directory only provisions the
+*infrastructure* (Lambda, API Gateway, RDS Proxy, the GitHub OIDC role
+that workflow assumes); the real `cd-api` code arrives via
+`aws lambda update-function-code` from that separate repo's pipeline, not
+from a `terraform apply` here.
 
 ## Validating without AWS credentials
 

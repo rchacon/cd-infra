@@ -1,10 +1,12 @@
 # One-time bootstrap: creates the S3 bucket that holds Terraform's OWN
 # state for every other terraform/ directory in this repo (networking/,
-# and eventually rds/, airflow/, cd-api/). State locking uses the S3
-# backend's native `use_lockfile` (Terraform >= 1.10), so no separate
-# DynamoDB table is needed. Applied once, with local state -- there's
-# nothing else yet to store this config's own state in. Not touched again
-# as part of normal day-to-day workflow once it exists.
+# rds/, airflow/, cd-api/). State locking uses the S3 backend's native
+# `use_lockfile` (Terraform >= 1.10), so no separate DynamoDB table is
+# needed. Applied once, with local state -- there's nothing else yet to
+# store this config's own state in. Not touched again as part of normal
+# day-to-day workflow once it exists -- the GitHub OIDC provider below
+# (added for #4) is a rare, deliberate exception: another account-wide
+# singleton that belongs here for the same reason the state bucket does.
 
 terraform {
   required_version = ">= 1.15"
@@ -69,4 +71,28 @@ resource "aws_s3_bucket_public_access_block" "terraform_state" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
+}
+
+# Account-wide singleton (only one OIDC provider can exist per unique
+# provider URL per account) -- lets GitHub Actions workflows assume an IAM
+# role via short-lived tokens instead of long-lived AWS keys stored as
+# GitHub secrets. First consumer is #4's cd-api-deploy IAM role
+# (rchacon/cd-platform#29), but this provider itself is reusable by any
+# future component's deploy workflow. thumbprint_list is intentionally
+# omitted -- confirmed optional in the current AWS provider version, and
+# hardcoding a thumbprint value here is exactly the kind of fragile,
+# silently-staleable assumption this project has been burned by before
+# (see the KMS alias-ARN note elsewhere in CLAUDE.md).
+resource "aws_iam_openid_connect_provider" "github_actions" {
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
+
+  # Confirmed on a real apply: Terraform's schema requires a scheme in
+  # `url` (validation rejects a bare hostname), but AWS strips it and
+  # returns the bare hostname on read regardless -- this provider version
+  # doesn't suppress that diff, causing a perpetual (and pointless, since
+  # nothing depends on this resource) destroy/recreate plan without this.
+  lifecycle {
+    ignore_changes = [url]
+  }
 }
