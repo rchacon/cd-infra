@@ -36,7 +36,8 @@ flowchart TB
     airflow -- attaches to --> airflow_sg
     lambda -- attaches to --> lambda_sg
 
-    airflow_sg -- "HTTPS :443" --> internet
+    airflow_sg -- "HTTPS :443" --> nat
+    nat --> igw
     airflow_sg -- "Postgres :5432" --> rds_sg
     lambda_sg -- "Postgres :5432" --> rds_sg
 ```
