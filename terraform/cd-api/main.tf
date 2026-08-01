@@ -447,7 +447,7 @@ data "aws_iam_policy_document" "cd_api_deploy_assume_role" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository_owner}/cd-platform:ref:refs/tags/cd-api-v*"]
+      values   = ["repo:${var.github_repository_owner}@${var.github_owner_id}/cd-platform@${var.github_repo_id}:ref:refs/tags/cd-api-v*"]
     }
   }
 }
