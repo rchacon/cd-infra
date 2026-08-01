@@ -171,15 +171,18 @@ data "archive_file" "placeholder" {
   type        = "zip"
   output_path = "${path.module}/files/placeholder.zip"
 
-  # Nested under src/, matching cd-platform's actual cd-api/src/app.py
-  # layout (confirmed against cd-platform#29's own description: deploy
-  # installs dependencies "alongside src/", not flattening it away) --
-  # this has to match the real deploy's structure, or the handler config
-  # below would be right for the real code but wrong for this placeholder
-  # (or vice versa), breaking the plan's own "aws lambda invoke against the
-  # placeholder confirms wiring" verification step.
+  # Flat at the zip root, matching cd-platform-cd-api-deploy.yml's real,
+  # merged build step (`cp src/*.py package/`) -- see #12. app.py's own
+  # sibling imports (`from db import ...` etc.) are absolute, so they only
+  # resolve if those modules sit alongside it in the same importable
+  # location; a src/-nested layout only lets `import src.app` succeed, not
+  # app.py's own internal imports once inside it. This has to match the
+  # real deploy's structure, or the handler config below would be right
+  # for the real code but wrong for this placeholder (or vice versa),
+  # breaking the plan's own "aws lambda invoke against the placeholder
+  # confirms wiring" verification step.
   source {
-    filename = "src/app.py"
+    filename = "app.py"
     content  = <<-PY
       def handler(event, context):
           return {"statusCode": 200, "body": "cd-api placeholder -- see cd-platform#29 for the real deploy"}
@@ -239,11 +242,14 @@ resource "aws_iam_role_policy" "lambda_kms" {
 resource "aws_lambda_function" "cd_api" {
   function_name = "cd-platform-cd-api"
   role          = aws_iam_role.lambda.arn
-  # cd-platform/cd-api/src/app.py's `handler = Mangum(app)`, per its own
-  # src/-nested layout (see cd-platform#29 and the archive_file comment
-  # above) -- not "app.handler". A wrong module path here fails cold start
-  # with "Unable to import module" once cd-platform#29 ships the real zip.
-  handler = "src.app.handler"
+  # cd-platform/cd-api/src/app.py's `handler = Mangum(app)`, but flat
+  # ("app.handler") not "src.app.handler" -- see #12. app.py's sibling
+  # imports are absolute (`from db import ...` etc.), so they only resolve
+  # if those modules are flat alongside it, not nested under src/; the
+  # real, merged cd-api-deploy.yml (`cp src/*.py package/`, confirmed via
+  # its own `from app import handler` sanity-check step) already builds
+  # its zip this way.
+  handler = "app.handler"
   runtime = "python3.12"
 
   filename         = data.archive_file.placeholder.output_path
