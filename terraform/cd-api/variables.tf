@@ -30,6 +30,25 @@ variable "github_repository_owner" {
   default     = "rchacon"
 }
 
+# cd-platform was created 2026-07-22, after GitHub's July 15, 2026 cutoff
+# for automatic immutable OIDC subject claims -- its sub claim is
+# "repo:rchacon@<owner_id>/cd-platform@<repo_id>:ref:...", not the plain
+# "repo:rchacon/cd-platform:ref:..." form, so the trust policy's sub
+# condition needs these IDs too or every AssumeRoleWithWebIdentity call
+# fails with "Not authorized" (confirmed via a real failed deploy run).
+# Values from `gh api repos/rchacon/cd-platform --jq '.owner.id, .id'`.
+variable "github_owner_id" {
+  description = "rchacon's numeric GitHub user ID, part of cd-platform's immutable OIDC sub claim."
+  type        = string
+  default     = "2160525"
+}
+
+variable "github_repo_id" {
+  description = "cd-platform's numeric GitHub repository ID, part of its immutable OIDC sub claim."
+  type        = string
+  default     = "1309136464"
+}
+
 variable "cd_api_db_username" {
   description = "Postgres role cd-api's Lambda connects as (via RDS Proxy) for ongoing runtime traffic -- scoped to its own database, never the RDS master/superuser credentials. Bootstrapped manually (see terraform/README.md), not by Terraform."
   type        = string
