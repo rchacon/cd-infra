@@ -287,6 +287,27 @@ that workflow assumes); the real `cd-api` code arrives via
 `aws lambda update-function-code` from that separate repo's pipeline, not
 from a `terraform apply` here.
 
+### OpenAPI spec bucket (cd-website#1)
+
+`cd-api` sits behind API Gateway with `api_key_required = true` on its one
+catch-all proxy method -- confirmed against the *live* API Gateway, not
+just this config, that there's no narrower per-path scoping -- so
+`docs.civicdog.com` can't fetch `/openapi.json` live from `cd-api` without
+exposing a key client-side. This directory provisions a small public S3
+bucket (`aws_s3_bucket.openapi_spec`, SSE-S3 encrypted rather than a
+customer-managed KMS key -- see the comment in `main.tf` for why a KMS key
+would actively conflict with the bucket's whole point of being publicly
+readable) and extends `cd-api-deploy`'s existing IAM role with `s3:PutObject`
+scoped to the one expected key, rather than minting a second role a single
+GitHub Actions job would have to juggle.
+
+**No object is uploaded by Terraform.** `cd-api-deploy.yml` (a separate,
+not-yet-implemented `cd-platform` change) is what will actually generate
+`openapi.json` from the FastAPI app and upload it here on every
+`cd-api-vX.X.X` release. Until that lands, this bucket exists but stays
+empty -- `terraform output openapi_spec_url` is the URL a future OpenAPI
+viewer in `cd-website`'s docs app will point at.
+
 ### Rotating an API Gateway API key
 
 `var.api_key_names` is a list specifically so rotation is a plain Terraform

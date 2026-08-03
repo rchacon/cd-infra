@@ -13,3 +13,13 @@ output "cd_api_app_db_password" {
   value       = random_password.cd_api_app.result
   sensitive   = true
 }
+
+output "openapi_spec_bucket_name" {
+  description = "S3 bucket cd-api-deploy.yml (cd-platform, not yet implemented) publishes openapi.json to."
+  value       = aws_s3_bucket.openapi_spec.bucket
+}
+
+output "openapi_spec_url" {
+  description = "Public HTTPS URL for the published OpenAPI spec -- what cd-website's docs app viewer will fetch."
+  value       = "https://${aws_s3_bucket.openapi_spec.bucket}.s3.${var.aws_region}.amazonaws.com/openapi.json"
+}
