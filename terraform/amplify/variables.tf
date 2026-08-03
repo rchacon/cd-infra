@@ -39,7 +39,22 @@ variable "domain_name" {
 }
 
 variable "github_repository" {
-  description = "GitHub repository URL both Amplify apps build from. Requires the AWS Amplify GitHub App to already be authorized for this repo (one-time manual step, see terraform/README.md) -- no access_token/oauth_token is set here, since that authorization is what lets Amplify resolve the connection at the account level."
+  description = "GitHub repository URL both Amplify apps build from. Requires the AWS Amplify GitHub App to already be installed/authorized for this repo (one-time manual step, see terraform/README.md)."
   type        = string
   default     = "https://github.com/rchacon/cd-website"
+}
+
+# Confirmed via a real failed apply + AWS's own docs (Amplify user guide,
+# "Setting up the Amplify GitHub App for CloudFormation, CLI, and SDK
+# deployments"): CreateApp always requires a token, even with the GitHub
+# App already installed and authorized -- the "zero-token" experience only
+# exists inside the Console's own UI flow, which exchanges one internally
+# behind the scenes. This token only needs the classic PAT scope
+# `admin:repo_hook` -- it's used once at creation time purely to register
+# Amplify's webhook, never to read/write repo contents (the GitHub App
+# installation is what actually grants repo access).
+variable "github_access_token" {
+  description = "GitHub personal access token (classic), scope: admin:repo_hook only. One-time bootstrapping credential for CreateApp's webhook registration."
+  type        = string
+  sensitive   = true
 }
