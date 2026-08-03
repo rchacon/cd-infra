@@ -478,3 +478,102 @@ resource "aws_iam_role_policy" "cd_api_deploy" {
   role   = aws_iam_role.cd_api_deploy.id
   policy = data.aws_iam_policy_document.cd_api_deploy_permissions.json
 }
+
+# --- OpenAPI spec bucket (cd-website#1) ----------------------------------
+#
+# cd-api sits behind API Gateway with api_key_required = true on its one
+# catch-all proxy method (confirmed against the *live* API Gateway, not
+# just this config -- there's no narrower per-path scoping), so
+# docs.civicdog.com can't fetch /openapi.json live from cd-api without
+# exposing a key client-side. This bucket is the publish target instead:
+# cd-api-deploy.yml (a separate, future cd-platform change) will generate
+# openapi.json from the FastAPI app and upload it here on every
+# cd-api-vX.X.X release; docs.civicdog.com fetches the public URL directly.
+# This module only provisions the bucket + the deploy role's write
+# permission -- no object is uploaded by Terraform itself.
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_s3_bucket" "openapi_spec" {
+  bucket = "cd-platform-openapi-spec-${data.aws_caller_identity.current.account_id}"
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+# Public access is via the bucket policy below only -- ACLs are never used,
+# so block_public_acls/ignore_public_acls stay at their safe default (true).
+# block_public_policy/restrict_public_buckets must be false, or the policy
+# below would be rejected at apply time. Both ignores below are that same
+# fact, not an oversight -- Trivy's defaults assume every bucket should
+# block public access, which is wrong for a bucket whose entire purpose is
+# public read.
+# trivy:ignore:AWS-0087 public policy is the intended access path for this bucket
+# trivy:ignore:AWS-0093 same -- this bucket is meant to be publicly readable
+resource "aws_s3_bucket_public_access_block" "openapi_spec" {
+  bucket = aws_s3_bucket.openapi_spec.id
+
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = false
+  restrict_public_buckets = false
+}
+
+# Bucket-wide (not scoped to one key) since this bucket's sole purpose is
+# public docs artifacts -- nothing sensitive is ever meant to live here, so
+# a bucket-wide read grant doesn't expose anything beyond what's intended.
+data "aws_iam_policy_document" "openapi_spec_public_read" {
+  statement {
+    sid       = "PublicReadOpenApiSpecBucket"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.openapi_spec.arn}/*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["*"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "openapi_spec" {
+  bucket     = aws_s3_bucket.openapi_spec.id
+  policy     = data.aws_iam_policy_document.openapi_spec_public_read.json
+  depends_on = [aws_s3_bucket_public_access_block.openapi_spec]
+}
+
+# SSE-S3 (AES256), deliberately not a customer-managed KMS key like every
+# other encrypted resource in this repo -- that pattern exists to require a
+# *second*, specific grant (kms:Decrypt) beyond IAM/bucket-policy access
+# before someone can read data, but this bucket's entire point is anonymous
+# public readability. A KMS key here would either have to grant
+# kms:Decrypt to everyone too (pointless) or actively break public GETs.
+# trivy:ignore:AWS-0132 SSE-S3 is deliberate here, not a missing CMK -- see comment above
+resource "aws_s3_bucket_server_side_encryption_configuration" "openapi_spec" {
+  bucket = aws_s3_bucket.openapi_spec.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# Extends cd-api-deploy (above) rather than minting a second role -- it's
+# already the identity cd-api-deploy.yml assumes via GitHub OIDC for
+# cd-api-vX.X.X tag deploys, and a single GitHub Actions job can only
+# cleanly assume one role. Scoped to the one expected key, unlike the
+# public-read policy above -- writes are the security-sensitive direction
+# here, reads are the whole point of the bucket.
+data "aws_iam_policy_document" "cd_api_deploy_openapi_publish" {
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.openapi_spec.arn}/openapi.json"]
+  }
+}
+
+resource "aws_iam_role_policy" "cd_api_deploy_openapi_publish" {
+  name   = "cd-platform-cd-api-deploy-openapi-publish"
+  role   = aws_iam_role.cd_api_deploy.id
+  policy = data.aws_iam_policy_document.cd_api_deploy_openapi_publish.json
+}
