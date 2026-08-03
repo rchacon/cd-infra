@@ -577,3 +577,112 @@ resource "aws_iam_role_policy" "cd_api_deploy_openapi_publish" {
   role   = aws_iam_role.cd_api_deploy.id
   policy = data.aws_iam_policy_document.cd_api_deploy_openapi_publish.json
 }
+
+# --- Custom domain: api.civicdog.com, /v1 base path (cd-website versioning
+# decision) ----------------------------------------------------------------
+#
+# URL-path versioning, not a request header: API Gateway REST API v1 has no
+# native way to route on a header value to a different backend -- routing
+# is resource-path + method only. base_path_mapping is first-class native
+# support for exactly this, and needs zero cd-api application code changes
+# (the "v1" segment is a routing-layer construct, stripped before reaching
+# the Lambda -- the same way the "prod" stage segment already is on the
+# existing execute-api URL, which is why cd-api's FastAPI routes are plain
+# "/members" today, not "/prod/members"). Confirm this on the real apply
+# rather than trusting the analogy blindly.
+
+resource "aws_acm_certificate" "api_domain" {
+  provider          = aws.us_east_1
+  domain_name       = var.api_domain_name
+  validation_method = "DNS"
+
+  tags = {
+    Project = "cd-platform"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# domain_validation_options is a *set* (same unordered-block gotcha as
+# amplify/'s sub_domain) -- there's only one element here (one domain, no
+# SANs), so tolist(...)[0] is enough, no for+if filtering needed.
+#
+# api_base_path is the single source of truth for the "v1" segment --
+# referenced by both the base_path_mapping below and outputs.tf's
+# api_custom_domain_url, so the two can't drift out of sync the way two
+# separate hardcoded "v1" literals could.
+locals {
+  api_domain_validation = tolist(aws_acm_certificate.api_domain.domain_validation_options)[0]
+  api_base_path         = "v1"
+}
+
+# trimsuffix: same trailing-"." lesson from amplify/'s ACM-adjacent DNS
+# records -- AWS returns these as fully-qualified values, Cloudflare
+# doesn't store the trailing dot as part of `content`.
+resource "cloudflare_record" "api_domain_validation" {
+  zone_id = var.cloudflare_zone_id
+  name    = trimsuffix(local.api_domain_validation.resource_record_name, ".")
+  type    = local.api_domain_validation.resource_record_type
+  content = trimsuffix(local.api_domain_validation.resource_record_value, ".")
+  ttl     = 300
+  proxied = false
+}
+
+# Unlike amplify/'s domain association, this doesn't need a
+# wait_for_verification=false workaround -- the cert request and its
+# validation are two separate resources with a normal dependency chain
+# (cert -> Cloudflare record -> validation), so by the time this resource
+# is created the DNS it needs to see already exists. No structural deadlock
+# here the way there was there.
+resource "aws_acm_certificate_validation" "api_domain" {
+  provider                = aws.us_east_1
+  certificate_arn         = aws_acm_certificate.api_domain.arn
+  validation_record_fqdns = [cloudflare_record.api_domain_validation.hostname]
+}
+
+resource "aws_api_gateway_domain_name" "cd_api" {
+  domain_name     = var.api_domain_name
+  certificate_arn = aws_acm_certificate_validation.api_domain.certificate_arn
+  # Explicit -- defaults to an outdated TLS policy otherwise (caught by a
+  # real Trivy finding, AWS-0005, not a guess).
+  security_policy = "TLS_1_2"
+
+  endpoint_configuration {
+    types = ["EDGE"]
+  }
+
+  tags = {
+    Project = "cd-platform"
+  }
+
+  # Matches aws_acm_certificate.api_domain's own lifecycle block above, and
+  # for the same reason: domain_name is ForceNew, so without this a future
+  # change to var.api_domain_name would destroy the live custom domain (and
+  # its dependent base_path_mapping/CNAME) before creating the replacement
+  # -- an avoidable outage window instead of a zero-downtime cutover.
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_api_gateway_base_path_mapping" "cd_api_v1" {
+  api_id      = aws_api_gateway_rest_api.cd_api.id
+  stage_name  = aws_api_gateway_stage.cd_api.stage_name
+  domain_name = aws_api_gateway_domain_name.cd_api.domain_name
+  base_path   = local.api_base_path
+}
+
+resource "cloudflare_record" "api_domain" {
+  zone_id = var.cloudflare_zone_id
+  name    = "api"
+  type    = "CNAME"
+  content = aws_api_gateway_domain_name.cd_api.cloudfront_domain_name
+  ttl     = 300
+  # Grey-cloud (DNS-only), same reasoning as amplify/'s records -- this is
+  # already backed by CloudFront (API Gateway's EDGE endpoint), so stacking
+  # Cloudflare's own proxy on top would be two CDNs in front of each other
+  # for no benefit.
+  proxied = false
+}

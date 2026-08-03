@@ -14,6 +14,10 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 4.0"
+    }
   }
 
   # Partial configuration -- bucket/key/region are supplied via `terraform
@@ -30,4 +34,18 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
+}
+
+# cd-api's REST API is EDGE-optimized (confirmed via `aws apigateway
+# get-rest-api` against the live resource, not assumed) -- EDGE custom
+# domains are backed by CloudFront, which requires the ACM certificate to
+# exist in us-east-1 specifically, regardless of the API's own region.
+# Used only by the api.civicdog.com certificate resources below.
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+}
+
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
 }

@@ -84,3 +84,23 @@ variable "rds_proxy_max_connections_percent" {
   type        = number
   default     = 50
 }
+
+# Same two variables ../amplify already has -- this module needs its own
+# Cloudflare access too, for api.civicdog.com's DNS validation and CNAME
+# records. Scoped to Zone:DNS:Edit for the civicdog.com zone only.
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token scoped to Zone:DNS:Edit for the civicdog.com zone only."
+  type        = string
+  sensitive   = true
+}
+
+variable "cloudflare_zone_id" {
+  description = "Cloudflare zone ID for civicdog.com (Cloudflare dashboard -> Overview tab, right sidebar)."
+  type        = string
+}
+
+variable "api_domain_name" {
+  description = "Custom domain for cd-api's API Gateway."
+  type        = string
+  default     = "api.civicdog.com"
+}
