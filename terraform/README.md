@@ -308,6 +308,28 @@ it here on every `cd-api-vX.X.X` release. `terraform output
 openapi_spec_url` is the URL `cd-website`'s docs app OpenAPI viewer points
 at.
 
+### Custom domain: api.civicdog.com, /v1 base path
+
+URL-path versioning (`/v1/...`), not a request header -- API Gateway REST
+API v1 has no native way to route on a header value to a different
+backend, while `aws_api_gateway_base_path_mapping` is first-class native
+support for path versioning and needs zero `cd-api` application code
+changes (the `v1` segment is a routing-layer construct, stripped before
+reaching the Lambda, the same way the `prod` stage segment already is on
+the existing execute-api URL).
+
+`cd-api`'s REST API is EDGE-optimized (confirmed against the live
+resource, not assumed), so the ACM certificate for `api.civicdog.com` has
+to be requested in `us-east-1` specifically -- a second, aliased `aws`
+provider exists in this directory just for that. DNS (validation record +
+the final `api` CNAME to the CloudFront target) is managed via the
+Cloudflare provider, needing its own `cloudflare_api_token`/
+`cloudflare_zone_id` in `terraform.tfvars`, same as `../amplify`.
+
+This is purely additive -- the existing execute-api URL keeps working
+unchanged. Updating `cd-lookup`'s configured endpoint to actually use
+`https://api.civicdog.com/v1` is a separate, later change.
+
 ### Rotating an API Gateway API key
 
 `var.api_key_names` is a list specifically so rotation is a plain Terraform

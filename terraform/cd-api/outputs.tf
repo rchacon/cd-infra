@@ -23,3 +23,8 @@ output "openapi_spec_url" {
   description = "Public HTTPS URL for the published OpenAPI spec -- what cd-website's docs app viewer will fetch."
   value       = "https://${aws_s3_bucket.openapi_spec.bucket}.s3.${var.aws_region}.amazonaws.com/openapi.json"
 }
+
+output "api_custom_domain_url" {
+  description = "cd-api's custom domain base URL, v1 base path included."
+  value       = "https://${aws_api_gateway_domain_name.cd_api.domain_name}/v1"
+}
