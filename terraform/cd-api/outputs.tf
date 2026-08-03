@@ -15,7 +15,7 @@ output "cd_api_app_db_password" {
 }
 
 output "openapi_spec_bucket_name" {
-  description = "S3 bucket cd-api-deploy.yml (cd-platform, not yet implemented) publishes openapi.json to."
+  description = "S3 bucket cd-api-deploy.yml (cd-platform) publishes openapi.json to."
   value       = aws_s3_bucket.openapi_spec.bucket
 }
 
