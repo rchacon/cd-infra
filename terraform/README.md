@@ -301,12 +301,12 @@ readable) and extends `cd-api-deploy`'s existing IAM role with `s3:PutObject`
 scoped to the one expected key, rather than minting a second role a single
 GitHub Actions job would have to juggle.
 
-**No object is uploaded by Terraform.** `cd-api-deploy.yml` (a separate,
-not-yet-implemented `cd-platform` change) is what will actually generate
-`openapi.json` from the FastAPI app and upload it here on every
-`cd-api-vX.X.X` release. Until that lands, this bucket exists but stays
-empty -- `terraform output openapi_spec_url` is the URL a future OpenAPI
-viewer in `cd-website`'s docs app will point at.
+**No object is uploaded by Terraform** -- this directory only provisions
+the bucket and the write permission. `cd-api-deploy.yml` (in
+`cd-platform`) generates `openapi.json` from the FastAPI app and uploads
+it here on every `cd-api-vX.X.X` release. `terraform output
+openapi_spec_url` is the URL `cd-website`'s docs app OpenAPI viewer points
+at.
 
 ### Rotating an API Gateway API key
 
