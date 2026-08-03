@@ -2,8 +2,8 @@
 
 AWS infrastructure for this repo, provisioned incrementally by component:
 `bootstrap/` (state backend, one-time), `networking/` (#1), `rds/` (#2),
-`airflow/` (#3), `cd-api/` (#4). See #5 for the overall AWS deployment
-tracking issue.
+`airflow/` (#3), `cd-api/` (#4), `amplify/` (Hosting for the `cd-website`
+repo's two apps). See #5 for the overall AWS deployment tracking issue.
 
 See the root `README.md` for an architecture diagram of the VPC, security
 groups, and planned compute resources.
@@ -341,6 +341,86 @@ private (not piped through a shared session/chat).
    terraform plan
    terraform apply
    ```
+
+## `amplify/` -- Amplify Hosting + Cloudflare DNS
+
+Two AWS Amplify Hosting apps for the `cd-website` repo's two independent
+Astro apps: `civicdog-site` (serves `apps/site`, deployed to
+`civicdog.com`/`www.civicdog.com`) and `civicdog-docs` (serves `apps/docs`,
+deployed to `docs.civicdog.com`). Both watch the same repo's `main` branch
+and build independently via each app's own `amplify.yml`, selected through
+the `AMPLIFY_MONOREPO_APP_ROOT` environment variable rather than a
+Terraform-level `build_spec` override.
+
+**`civicdog.com`'s DNS stays at Cloudflare** (where the domain is
+registered) rather than migrating to Route53 -- the domain has an active
+Google Workspace email integration (MX/SPF/DKIM records set up via
+Cloudflare's one-click app) that isn't fully reproducible by hand, so this
+module manages DNS via the Cloudflare Terraform provider instead, touching
+only the specific records Amplify needs and never anything email-related.
+
+**Two manual, one-time prerequisites this module can't do for you**, before
+`terraform apply` will work:
+
+1. **Authorize the AWS Amplify GitHub App** for `rchacon/cd-website` -- AWS
+   Amplify console, start (and it's fine to then cancel) a "New app" flow,
+   or Account settings -> GitHub connections -> Authorize. This is an
+   account-level connection Terraform's `aws_amplify_app` resources rely on
+   already existing; there's no way to script GitHub's OAuth consent step.
+2. **Create a Cloudflare API token** scoped to `Zone:DNS:Edit` for the
+   `civicdog.com` zone only (Cloudflare dashboard -> My Profile -> API
+   Tokens -> Create Token -> "Edit zone DNS" template -- never the legacy
+   account-wide Global API Key), and note the zone's ID from the dashboard's
+   Overview tab.
+
+```bash
+cd terraform/amplify
+cat > backend.hcl <<EOF
+bucket  = "<state_bucket_name from bootstrap output>"
+key     = "amplify/terraform.tfstate"
+region  = "us-west-2"
+encrypt = true
+EOF
+cat > terraform.tfvars <<EOF
+state_bucket_name    = "<state_bucket_name from bootstrap output>"
+cloudflare_api_token = "<token from the Cloudflare API Tokens page>"
+cloudflare_zone_id   = "<zone ID from the Cloudflare dashboard>"
+EOF
+
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+```
+
+**Apply this in two passes rather than all at once**, since it touches a
+real, in-use domain (email included):
+
+1. First, apply with the two `aws_amplify_domain_association` resources and
+   the `cloudflare_record` resources commented out (or `terraform apply
+   -target=aws_amplify_app.site -target=aws_amplify_app.docs
+   -target=aws_amplify_branch.site_main -target=aws_amplify_branch.docs_main`).
+   Confirm both apps build and deploy successfully to their default
+   `terraform output site_default_domain` / `docs_default_domain`
+   `*.amplifyapp.com` URLs -- this proves the GitHub App connection and
+   `AMPLIFY_MONOREPO_APP_ROOT` build config actually work, with zero DNS
+   risk.
+2. Once that's confirmed, apply the rest. The new Cloudflare records are
+   additive and don't touch the zone's existing MX/SPF/DKIM records, but
+   doing this as a second, deliberate step keeps the blast radius small.
+
+`aws_amplify_domain_association.site`/`.docs` are both created with
+`wait_for_verification = false` -- their own `certificate_verification_dns_record`
+and `sub_domain[*].dns_record` outputs are what the `cloudflare_record`
+resources below them are built from, so the DNS they'd be waiting to see
+doesn't exist yet at the moment they're created. Verification happens
+asynchronously in AWS's backend once the Cloudflare records exist; check
+actual status in the Amplify console (or a follow-up `terraform plan`)
+rather than trusting `apply`'s exit code for these two resources.
+
+After both passes, verify `civicdog.com`, `www.civicdog.com`, and
+`docs.civicdog.com` all resolve over HTTPS to the right app, and --
+critically -- send a test email to a `civicdog.com` address to confirm the
+Google Workspace records were never touched.
 
 ## Validating without AWS credentials
 
