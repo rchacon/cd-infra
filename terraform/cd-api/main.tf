@@ -650,6 +650,15 @@ resource "aws_api_gateway_domain_name" "cd_api" {
   tags = {
     Project = "cd-platform"
   }
+
+  # Matches aws_acm_certificate.api_domain's own lifecycle block above, and
+  # for the same reason: domain_name is ForceNew, so without this a future
+  # change to var.api_domain_name would destroy the live custom domain (and
+  # its dependent base_path_mapping/CNAME) before creating the replacement
+  # -- an avoidable outage window instead of a zero-downtime cutover.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_api_gateway_base_path_mapping" "cd_api_v1" {
