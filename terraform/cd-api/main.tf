@@ -505,7 +505,12 @@ resource "aws_s3_bucket" "openapi_spec" {
 # Public access is via the bucket policy below only -- ACLs are never used,
 # so block_public_acls/ignore_public_acls stay at their safe default (true).
 # block_public_policy/restrict_public_buckets must be false, or the policy
-# below would be rejected at apply time.
+# below would be rejected at apply time. Both ignores below are that same
+# fact, not an oversight -- Trivy's defaults assume every bucket should
+# block public access, which is wrong for a bucket whose entire purpose is
+# public read.
+# trivy:ignore:AWS-0087 public policy is the intended access path for this bucket
+# trivy:ignore:AWS-0093 same -- this bucket is meant to be publicly readable
 resource "aws_s3_bucket_public_access_block" "openapi_spec" {
   bucket = aws_s3_bucket.openapi_spec.id
 
@@ -543,6 +548,7 @@ resource "aws_s3_bucket_policy" "openapi_spec" {
 # before someone can read data, but this bucket's entire point is anonymous
 # public readability. A KMS key here would either have to grant
 # kms:Decrypt to everyone too (pointless) or actively break public GETs.
+# trivy:ignore:AWS-0132 SSE-S3 is deliberate here, not a missing CMK -- see comment above
 resource "aws_s3_bucket_server_side_encryption_configuration" "openapi_spec" {
   bucket = aws_s3_bucket.openapi_spec.id
 
