@@ -608,8 +608,14 @@ resource "aws_acm_certificate" "api_domain" {
 # domain_validation_options is a *set* (same unordered-block gotcha as
 # amplify/'s sub_domain) -- there's only one element here (one domain, no
 # SANs), so tolist(...)[0] is enough, no for+if filtering needed.
+#
+# api_base_path is the single source of truth for the "v1" segment --
+# referenced by both the base_path_mapping below and outputs.tf's
+# api_custom_domain_url, so the two can't drift out of sync the way two
+# separate hardcoded "v1" literals could.
 locals {
   api_domain_validation = tolist(aws_acm_certificate.api_domain.domain_validation_options)[0]
+  api_base_path         = "v1"
 }
 
 # trimsuffix: same trailing-"." lesson from amplify/'s ACM-adjacent DNS
@@ -665,7 +671,7 @@ resource "aws_api_gateway_base_path_mapping" "cd_api_v1" {
   api_id      = aws_api_gateway_rest_api.cd_api.id
   stage_name  = aws_api_gateway_stage.cd_api.stage_name
   domain_name = aws_api_gateway_domain_name.cd_api.domain_name
-  base_path   = "v1"
+  base_path   = local.api_base_path
 }
 
 resource "cloudflare_record" "api_domain" {

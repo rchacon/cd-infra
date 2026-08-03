@@ -26,5 +26,5 @@ output "openapi_spec_url" {
 
 output "api_custom_domain_url" {
   description = "cd-api's custom domain base URL, v1 base path included."
-  value       = "https://${aws_api_gateway_domain_name.cd_api.domain_name}/v1"
+  value       = "https://${aws_api_gateway_domain_name.cd_api.domain_name}/${local.api_base_path}"
 }
