@@ -559,6 +559,30 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "openapi_spec" {
   }
 }
 
+# CORS so docs.civicdog.com's client-side fetch() of openapi.json passes its
+# browser preflight (cd-website#1's Scalar viewer) -- curl/server-side
+# fetches never hit this, only browsers enforce CORS, which is why the
+# object being publicly readable wasn't enough on its own (cd-infra#20).
+# AllowedHeaders is "*" and AllowedMethods is GET-only since this bucket
+# serves one public, non-sensitive JSON file -- a wildcard on headers costs
+# nothing here and avoids preflight rejections over incidental headers
+# browsers may attach. "http://localhost:*" (a single wildcard, S3 CORS
+# supports one per AllowedOrigin string) covers any local dev server port
+# for the docs app rather than pinning to Astro's current default (4322).
+resource "aws_s3_bucket_cors_configuration" "openapi_spec" {
+  bucket = aws_s3_bucket.openapi_spec.id
+
+  cors_rule {
+    allowed_methods = ["GET"]
+    allowed_origins = [
+      "https://docs.civicdog.com",
+      "http://localhost:*",
+    ]
+    allowed_headers = ["*"]
+    max_age_seconds = 3600
+  }
+}
+
 # Extends cd-api-deploy (above) rather than minting a second role -- it's
 # already the identity cd-api-deploy.yml assumes via GitHub OIDC for
 # cd-api-vX.X.X tag deploys, and a single GitHub Actions job can only
