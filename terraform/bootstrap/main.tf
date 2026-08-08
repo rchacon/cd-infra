@@ -96,3 +96,87 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
     ignore_changes = [url]
   }
 }
+
+# Account-wide singleton, same rationale as the OIDC provider above --
+# added to answer "what's actually generating this AWS bill/usage"
+# questions (e.g. a KMS free-tier warning) via CloudTrail Event history,
+# CloudWatch metrics, and Cost Explorer. Deliberately a SEPARATE role
+# rather than adding these actions to the cd-terraform deployer user's own
+# policy: that policy is hand-managed in the Console and built up
+# empirically, one real AccessDenied error at a time, against what
+# `terraform apply` actually needs (see CLAUDE.md's IAM section) --
+# broadening it preemptively for unrelated read-only investigation work
+# would defeat that discipline. Trusts the account root rather than a
+# specific principal so any current or future in-account identity can opt
+# in by adding a single `sts:AssumeRole` statement scoped to this role's
+# ARN to its own policy, without this trust policy ever needing to change.
+data "aws_iam_policy_document" "observability_readonly_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+}
+
+resource "aws_iam_role" "observability_readonly" {
+  name               = "cd-platform-observability-readonly"
+  assume_role_policy = data.aws_iam_policy_document.observability_readonly_assume_role.json
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+# resources = ["*"] on all three statements isn't an over-grant -- none of
+# these three read APIs support resource-level ARN scoping at all (a real
+# AWS constraint, confirmed against each action's own IAM reference page,
+# not an assumption). Kept to exactly the read-only actions this role's
+# stated purpose needs, nothing broader (no *:Describe*/*:List* catch-all).
+data "aws_iam_policy_document" "observability_readonly" {
+  statement {
+    sid = "CloudTrailReadOnly"
+    actions = [
+      "cloudtrail:LookupEvents",
+      "cloudtrail:DescribeTrails",
+      "cloudtrail:GetTrailStatus",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "CloudWatchReadOnly"
+    actions = [
+      "cloudwatch:GetMetricData",
+      "cloudwatch:GetMetricStatistics",
+      "cloudwatch:ListMetrics",
+      "cloudwatch:DescribeAlarms",
+    ]
+    resources = ["*"]
+  }
+
+  # Cost Explorer additionally needs "IAM access to billing information"
+  # enabled account-wide (root account -> Account -> IAM Access to Billing
+  # Information) before ce:* actions work for ANY IAM identity, regardless
+  # of policy -- a well-known AWS gotcha, not something this policy alone
+  # can grant. If ce:GetCostAndUsage still 403s after assuming this role,
+  # check that setting first before adding more IAM actions.
+  statement {
+    sid = "CostExplorerReadOnly"
+    actions = [
+      "ce:GetCostAndUsage",
+      "ce:GetCostForecast",
+      "ce:GetDimensionValues",
+      "ce:GetTags",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "observability_readonly" {
+  name   = "cd-platform-observability-readonly"
+  role   = aws_iam_role.observability_readonly.id
+  policy = data.aws_iam_policy_document.observability_readonly.json
+}
