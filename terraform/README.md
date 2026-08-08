@@ -40,6 +40,35 @@ directory once (from whichever machine holds its local `terraform.tfstate`
 note the new `github_oidc_provider_arn` output for `cd-api/`'s
 `terraform.tfvars` (see below).
 
+**`observability_readonly_role_arn`** is another account-wide singleton
+here, a read-only IAM role (CloudTrail Event history, CloudWatch metrics,
+Cost Explorer) for answering "what's actually driving this AWS usage/bill"
+questions -- e.g. a free-tier warning email. Deliberately separate from
+`cd-terraform`'s own Console-managed policy (see CLAUDE.md's IAM section).
+To use it, add a one-line statement to `cd-terraform`'s Console policy
+granting `sts:AssumeRole` on this role's ARN, then:
+
+```bash
+CREDS=$(aws sts assume-role \
+  --role-arn "$(terraform -chdir=terraform/bootstrap output -raw observability_readonly_role_arn)" \
+  --role-session-name observability --query Credentials --output json)
+export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .SecretAccessKey)
+export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .SessionToken)
+
+# e.g. find what's calling a specific KMS key:
+aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventSource,AttributeValue=kms.amazonaws.com
+aws ce get-cost-and-usage --time-period Start=2026-07-01,End=2026-08-01 \
+  --granularity MONTHLY --metrics UsageQuantity \
+  --group-by Type=DIMENSION,Key=SERVICE
+```
+
+If `ce:GetCostAndUsage` still 403s after assuming the role, check that
+"IAM access to billing information" is enabled account-wide (root account
+-> Account -> IAM Access to Billing Information) -- Cost Explorer ignores
+IAM policy entirely for any identity until that's on, regardless of what
+this role grants.
+
 ## `networking/` -- VPC, subnets, security groups
 
 The shared network layer RDS (#2), the Airflow EC2 instance (#3), and
