@@ -171,18 +171,19 @@ data "archive_file" "placeholder" {
   type        = "zip"
   output_path = "${path.module}/files/placeholder.zip"
 
-  # Flat at the zip root, matching cd-platform-cd-api-deploy.yml's real,
-  # merged build step (`cp src/*.py package/`) -- see #12. app.py's own
-  # sibling imports (`from db import ...` etc.) are absolute, so they only
-  # resolve if those modules sit alongside it in the same importable
-  # location; a src/-nested layout only lets `import src.app` succeed, not
-  # app.py's own internal imports once inside it. This has to match the
-  # real deploy's structure, or the handler config below would be right
-  # for the real code but wrong for this placeholder (or vice versa),
-  # breaking the plan's own "aws lambda invoke against the placeholder
-  # confirms wiring" verification step.
+  # Nested under cd/api/, matching cd-platform-cd-api-deploy.yml's real
+  # build step post cd-platform#58 (`cp -r src/cd package/`) -- see #26.
+  # app.py's own internal imports are now fully-qualified absolute imports
+  # (`from cd.api.db import ...`), and the cd package sits directly at the
+  # zip root, so this nesting resolves correctly under Lambda's
+  # only-the-zip-root-is-on-sys.path constraint -- the same constraint
+  # that required a flat layout before #58 (see #12). This has to match
+  # the real deploy's structure, or the handler config below would be
+  # right for the real code but wrong for this placeholder (or vice
+  # versa), breaking the plan's own "aws lambda invoke against the
+  # placeholder confirms wiring" verification step.
   source {
-    filename = "app.py"
+    filename = "cd/api/app.py"
     content  = <<-PY
       def handler(event, context):
           return {"statusCode": 200, "body": "cd-api placeholder -- see cd-platform#29 for the real deploy"}
@@ -242,14 +243,16 @@ resource "aws_iam_role_policy" "lambda_kms" {
 resource "aws_lambda_function" "cd_api" {
   function_name = "cd-platform-cd-api"
   role          = aws_iam_role.lambda.arn
-  # cd-platform/cd-api/src/app.py's `handler = Mangum(app)`, but flat
-  # ("app.handler") not "src.app.handler" -- see #12. app.py's sibling
-  # imports are absolute (`from db import ...` etc.), so they only resolve
-  # if those modules are flat alongside it, not nested under src/; the
-  # real, merged cd-api-deploy.yml (`cp src/*.py package/`, confirmed via
-  # its own `from app import handler` sanity-check step) already builds
-  # its zip this way.
-  handler = "app.handler"
+  # cd-platform/cd-api/src/cd/api/app.py's `handler = Mangum(app)`,
+  # package-qualified ("cd.api.app.handler") since cd-platform#58 -- see
+  # #26. app.py's sibling imports are now fully-qualified absolute imports
+  # (`from cd.api.db import ...`), and the cd package sits directly at the
+  # zip root, so this resolves correctly under Lambda's
+  # only-the-zip-root-is-on-sys.path constraint (the same constraint that
+  # required the old flat "app.handler" path pre-#58, see #12). The real,
+  # merged cd-api-deploy.yml (`cp -r src/cd package/`) already builds its
+  # zip this way.
+  handler = "cd.api.app.handler"
   runtime = "python3.12"
 
   filename         = data.archive_file.placeholder.output_path
