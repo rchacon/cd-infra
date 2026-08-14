@@ -44,3 +44,9 @@ variable "cd_etl_db_username" {
   type        = string
   default     = "cd_etl_app"
 }
+
+variable "airflow_parallelism" {
+  description = "AIRFLOW__CORE__PARALLELISM -- caps how many LocalExecutor worker subprocesses the scheduler spawns at startup. Default of 4 is sized for this instance's t3.small (2 vCPU/1.9GiB): Airflow's own default of 32 spawns 32 idle workers at ~130MB RSS each, over 4GB of baseline commitment alone, which OOM-killed a house_votes_etl task on 2026-08-14."
+  type        = number
+  default     = 4
+}

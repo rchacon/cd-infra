@@ -190,6 +190,7 @@ resource "aws_instance" "airflow" {
     airflow_metadata_db_name    = var.airflow_metadata_db_name
     cd_etl_db_username          = var.cd_etl_db_username
     ghcr_image                  = "ghcr.io/${var.github_repository_owner}/cd-etl"
+    airflow_parallelism         = var.airflow_parallelism
   })
   # Without this, Terraform only runs user_data on first boot -- editing the
   # template and re-applying would silently no-op against an
