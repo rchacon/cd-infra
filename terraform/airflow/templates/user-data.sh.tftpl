@@ -103,6 +103,11 @@ PGPASSWORD=$CD_ETL_APP_PASS
 PGDATABASE=cd_platform
 AIRFLOW_CONN_CONGRESSIONAL_POSTGRES=postgresql://$${CD_ETL_APP_USER_ENC}:$${CD_ETL_APP_PASS_ENC}@${rds_address}:5432/cd_platform
 AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://$${CD_ETL_APP_USER_ENC}:$${CD_ETL_APP_PASS_ENC}@${rds_address}:5432/${airflow_metadata_db_name}
+# Caps LocalExecutor's idle worker pool -- Airflow's own default (32) spawns
+# 32 worker subprocesses at ~130MB RSS each regardless of actual DAG load,
+# which OOM-killed a house_votes_etl task on this instance's 1.9GiB RAM (see
+# variables.tf's airflow_parallelism).
+AIRFLOW__CORE__PARALLELISM=${airflow_parallelism}
 EOF
 chmod 600 /opt/airflow/.env
 
