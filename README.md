@@ -11,6 +11,7 @@ flowchart TB
     cf[["Cloudflare DNS<br/>#19"]]
     apigw[["API Gateway<br/>#4"]]
     openapi[("openapi_spec S3<br/>#18, #21")]
+    gha[["GitHub Actions<br/>cd-api-deploy.yml"]]
 
     subgraph vpc["VPC -- 10.0.0.0/16 (networking/, #1)"]
         igw["Internet Gateway"]
@@ -35,6 +36,7 @@ flowchart TB
     cf -- CNAME --> apigw
     internet -- "*.execute-api...amazonaws.com" --> apigw
     internet -- "GET openapi.json" --> openapi
+    gha -- "PutObject openapi.json (OIDC, scoped to that one key)" --> openapi
     apigw -- invokes --> lambda
 
     rds -- protected by --> rds_sg
@@ -82,7 +84,9 @@ still works. The `openapi_spec` S3 bucket (#18, its CORS config added in
 #21) is unrelated to that request path entirely -- a separate,
 publicly-readable bucket (SSE-S3, deliberately not a customer-managed KMS
 key, since anonymous public `GetObject` is the whole point) serving
-`openapi.json` for `cd-website`'s docs viewer at `docs.civicdog.com`.
-`cd-api-deploy.yml`'s GitHub OIDC role is the only writer (`s3:PutObject`
-scoped to that one key, on every `cd-api-vX.X.X` tag deploy) -- Terraform
-only provisions the bucket, never uploads to it itself.
+`openapi.json` for `cd-website`'s docs viewer at `docs.civicdog.com`. The
+only writer is `cd-api-deploy.yml`'s GitHub Actions run (shown above) via
+its GitHub OIDC role, on every `cd-api-vX.X.X` tag deploy -- scoped to
+`s3:PutObject` on that one key, nothing broader. Terraform only
+provisions the bucket and that write grant; it never uploads to the
+bucket itself.
