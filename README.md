@@ -8,7 +8,9 @@ Infrastructure as code for provisioning AWS resources for `cd-platform`. See
 ```mermaid
 flowchart TB
     internet(("Internet"))
+    cf[["Cloudflare DNS<br/>#19"]]
     apigw[["API Gateway<br/>#4"]]
+    openapi[("openapi_spec S3<br/>#18, #21")]
 
     subgraph vpc["VPC -- 10.0.0.0/16 (networking/, #1)"]
         igw["Internet Gateway"]
@@ -29,7 +31,10 @@ flowchart TB
 
     internet --- igw
     igw --- pub
-    internet --- apigw
+    internet -- "api.civicdog.com/v1" --> cf
+    cf -- CNAME --> apigw
+    internet -- "*.execute-api...amazonaws.com" --> apigw
+    internet -- "GET openapi.json" --> openapi
     apigw -- invokes --> lambda
 
     rds -- protected by --> rds_sg
@@ -67,3 +72,17 @@ no boot-time hook to run it from), documented in `terraform/README.md`.
 `bootstrap/`'s S3 state bucket/KMS key/GitHub OIDC provider and every
 component's own KMS key aren't part of this diagram -- they're supporting
 resources, not part of the app's runtime traffic path.
+
+`api.civicdog.com` (#19) is a Cloudflare-managed CNAME onto API Gateway's
+custom domain (an ACM cert + `EDGE`/CloudFront endpoint), with `/v1`
+URL-path versioning via `base_path_mapping` -- a friendlier alternate entry
+point onto the exact same `apigw`/stage/Lambda as the raw
+`*.execute-api...amazonaws.com` invoke URL, both shown above since either
+still works. The `openapi_spec` S3 bucket (#18, its CORS config added in
+#21) is unrelated to that request path entirely -- a separate,
+publicly-readable bucket (SSE-S3, deliberately not a customer-managed KMS
+key, since anonymous public `GetObject` is the whole point) serving
+`openapi.json` for `cd-website`'s docs viewer at `docs.civicdog.com`.
+`cd-api-deploy.yml`'s GitHub OIDC role is the only writer (`s3:PutObject`
+scoped to that one key, on every `cd-api-vX.X.X` tag deploy) -- Terraform
+only provisions the bucket, never uploads to it itself.
