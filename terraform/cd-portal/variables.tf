@@ -39,3 +39,28 @@ variable "cognito_password_minimum_length" {
   type        = number
   default     = 8
 }
+
+# Scoped to "Zone:DNS:Edit" on the civicdog.com zone only -- see
+# ../amplify/variables.tf's identical variable for the full rationale
+# (never the legacy account-wide Global API Key).
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token scoped to Zone:DNS:Edit for the civicdog.com zone only."
+  type        = string
+  sensitive   = true
+}
+
+variable "cloudflare_zone_id" {
+  description = "Cloudflare zone ID for civicdog.com (Cloudflare dashboard -> Overview tab, right sidebar)."
+  type        = string
+}
+
+# The apex domain cd-portal's subdomain is provisioned under -- civicdog.com
+# is registered outside AWS, so this can't be inferred from anything
+# Terraform already manages. Same variable shape as ../amplify/'s, though
+# that module's default value isn't reused here on purpose (a typo in one
+# shouldn't silently propagate to the other).
+variable "domain_name" {
+  description = "The apex domain cd-portal's subdomain is provisioned under."
+  type        = string
+  default     = "civicdog.com"
+}

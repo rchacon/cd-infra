@@ -4,8 +4,13 @@ output "cd_portal_app_id" {
 }
 
 output "cd_portal_default_domain" {
-  description = "cd-portal's default *.amplifyapp.com URL -- useful for confirming a deploy works before a custom domain is added."
+  description = "cd-portal's default *.amplifyapp.com URL -- useful for confirming a deploy works independent of DNS/domain-association status."
   value       = aws_amplify_app.cd_portal.default_domain
+}
+
+output "cd_portal_url" {
+  description = "cd-portal's custom domain URL."
+  value       = "https://portal.${var.domain_name}"
 }
 
 output "cognito_user_pool_id" {

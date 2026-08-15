@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 4.0"
+    }
   }
 
   # Partial configuration -- bucket/key/region are supplied via `terraform
@@ -21,6 +25,9 @@ provider "aws" {
   region = var.aws_region
 }
 
-# No cloudflare provider yet -- this module doesn't touch DNS until the
-# domain-association follow-up (see terraform/README.md's cd-portal/
-# section), same staged-apply approach ../amplify/ already documents.
+# civicdog.com's DNS stays at Cloudflare -- see ../amplify/versions.tf's
+# identical comment for the full Google Workspace email reasoning. This
+# provider only ever touches portal.civicdog.com's own two records below.
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
+}

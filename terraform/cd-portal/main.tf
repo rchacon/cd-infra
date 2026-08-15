@@ -126,8 +126,59 @@ resource "aws_amplify_branch" "cd_portal_main" {
   }
 }
 
-# No aws_amplify_domain_association / Cloudflare records yet -- deliberately
-# staged the same way terraform/README.md already documents for
-# ../amplify/: apps/branches first (confirm the *.amplifyapp.com URL
-# below), domain association + DNS as a separate follow-up apply, since
-# that step touches the live civicdog.com zone.
+# wait_for_verification = false: same reasoning as ../amplify/'s two
+# domain associations -- this resource's own certificate_verification_dns_
+# record/sub_domain[*].dns_record outputs are what the cloudflare_record
+# resources below are built from, so the DNS being verified against
+# doesn't exist yet at the moment this is created. Verification happens
+# asynchronously; check actual status via the Amplify console or a
+# follow-up `terraform plan`, not apply's exit code for this one resource.
+resource "aws_amplify_domain_association" "cd_portal" {
+  app_id                = aws_amplify_app.cd_portal.id
+  domain_name           = var.domain_name
+  wait_for_verification = false
+
+  sub_domain {
+    branch_name = aws_amplify_branch.cd_portal_main.branch_name
+    prefix      = "portal"
+  }
+}
+
+# --- Cloudflare DNS records ------------------------------------------------
+#
+# Same 3-field "<name-or-empty> <TYPE> <VALUE>" shape for both
+# certificate_verification_dns_record and dns_record, and the same
+# not-trimspace()'d split(" ", ...) parsing -- see ../amplify/main.tf's
+# detailed comment on this for the full story (confirmed there against a
+# real apply). sub_domain is a single-element set here (only "portal"), so
+# tolist(...)[0] is enough -- no for+if filtering needed the way
+# ../amplify/'s multi-prefix "site" app needs.
+locals {
+  cd_portal_cert_verification = split(" ", aws_amplify_domain_association.cd_portal.certificate_verification_dns_record)
+  cd_portal_sub_record        = split(" ", tolist(aws_amplify_domain_association.cd_portal.sub_domain)[0].dns_record)
+}
+
+resource "cloudflare_record" "cd_portal_cert_verification" {
+  zone_id = var.cloudflare_zone_id
+  name    = local.cd_portal_cert_verification[0]
+  type    = local.cd_portal_cert_verification[1]
+  # trimsuffix: AWS returns this as a fully-qualified value with a trailing
+  # "." that Cloudflare doesn't store as part of `content`.
+  content = trimsuffix(local.cd_portal_cert_verification[2], ".")
+  ttl     = 300
+  proxied = false
+}
+
+resource "cloudflare_record" "cd_portal_sub" {
+  zone_id = var.cloudflare_zone_id
+  name    = "portal"
+  type    = local.cd_portal_sub_record[1]
+  content = trimsuffix(local.cd_portal_sub_record[2], ".")
+  ttl     = 300
+  # Grey-cloud (DNS-only) -- Amplify already fronts this with its own
+  # CloudFront distribution and manages its own ACM certificate; stacking
+  # Cloudflare's proxy on top would be two CDNs in front of each other for
+  # no benefit, and would likely break Amplify's own domain verification
+  # besides. Same reasoning as ../amplify/'s records.
+  proxied = false
+}

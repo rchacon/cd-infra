@@ -470,17 +470,12 @@ Google Workspace records were never touched.
 `cd-portal` is the customer portal (`rchacon/cd-portal`, React + TypeScript
 + Vite -- a separate, dedicated repo, not part of `cd-website`'s monorepo)
 where customers sign up for an API key, view their usage, and pay their
-bill. This directory provisions its Amplify Hosting app/branch and a
-Cognito User Pool + App Client for customer auth -- unlike `amplify/`'s two
-apps, `cd-portal` has no `AMPLIFY_MONOREPO_APP_ROOT`/`applications:` build
-spec wrapper, just a plain single-app one, since it isn't sharing a repo
-with anything else.
-
-**No custom domain yet** -- this directory intentionally stops at the
-default `*.amplifyapp.com` URL for now, same staged-rollout reasoning as
-`amplify/`'s two-pass apply below. Adding `portal.civicdog.com` (or
-whichever subdomain is chosen) plus the matching Cloudflare records is a
-separate follow-up, once the app itself is confirmed working.
+bill, deployed to `portal.civicdog.com`. This directory provisions its
+Amplify Hosting app/branch/domain association, its Cloudflare DNS records,
+and a Cognito User Pool + App Client for customer auth -- unlike
+`amplify/`'s two apps, `cd-portal` has no
+`AMPLIFY_MONOREPO_APP_ROOT`/`applications:` build spec wrapper, just a
+plain single-app one, since it isn't sharing a repo with anything else.
 
 Auth is AWS Cognito, not a self-rolled scheme -- the User Pool's App Client
 is a public client (no secret; can't be kept confidential in a
@@ -490,12 +485,17 @@ through Cognito's own built-in ("`COGNITO_DEFAULT`") sending, which has a
 low daily quota not meant for real signup volume -- move to SES before
 that becomes a real constraint.
 
-**One manual, one-time prerequisite**, same requirement as `amplify/`'s:
+**Two manual, one-time prerequisites**, same requirements as `amplify/`'s:
 
 1. **Authorize the AWS Amplify GitHub App** for `rchacon/cd-portal` -- AWS
    Amplify console, same steps as `amplify/`'s prerequisite above. This is
    a separate authorization from `cd-website`'s -- GitHub App installs are
    per-repository.
+2. **Create a Cloudflare API token** scoped to `Zone:DNS:Edit` for the
+   `civicdog.com` zone -- reuse the same token `amplify/` uses if you still
+   have it (same scope, same zone), or generate a new one the same way
+   (Cloudflare dashboard -> My Profile -> API Tokens -> "Edit zone DNS"
+   template).
 
 ```bash
 cd terraform/cd-portal
@@ -506,8 +506,10 @@ region  = "us-west-2"
 encrypt = true
 EOF
 cat > terraform.tfvars <<EOF
-state_bucket_name   = "<state_bucket_name from bootstrap output>"
-github_access_token = "<PAT, scope admin:repo_hook -- see amplify/'s section above for why one's needed at all>"
+state_bucket_name    = "<state_bucket_name from bootstrap output>"
+github_access_token  = "<PAT, scope admin:repo_hook -- see amplify/'s section above for why one's needed at all>"
+cloudflare_api_token = "<token from the Cloudflare API Tokens page>"
+cloudflare_zone_id   = "<zone ID from the Cloudflare dashboard>"
 EOF
 
 terraform init -backend-config=backend.hcl
@@ -515,9 +517,29 @@ terraform plan
 terraform apply
 ```
 
-After applying, confirm `terraform output cd_portal_default_domain`
-resolves and builds/deploys correctly before wiring up `cd-server` (once
-that directory exists) or a custom domain against it.
+**Apply this in two passes rather than all at once**, same reasoning as
+`amplify/`'s two-pass note above -- it touches the live `civicdog.com` zone:
+
+1. First, apply just the app/branch/Cognito resources (e.g. `terraform
+   apply -target=aws_amplify_app.cd_portal
+   -target=aws_amplify_branch.cd_portal_main
+   -target=aws_cognito_user_pool.cd_portal
+   -target=aws_cognito_user_pool_client.cd_portal`). Confirm
+   `terraform output cd_portal_default_domain` builds and deploys
+   successfully on its `*.amplifyapp.com` URL -- zero DNS risk.
+2. Once confirmed, apply the rest (`aws_amplify_domain_association` +
+   the two `cloudflare_record` resources). Verify `portal.civicdog.com`
+   resolves over HTTPS afterward -- these records are additive and don't
+   touch the zone's existing MX/SPF/DKIM records, but a second deliberate
+   step keeps the blast radius small regardless.
+
+`aws_amplify_domain_association.cd_portal` is created with
+`wait_for_verification = false` -- same reason as `amplify/`'s two
+associations (its own outputs are what the Cloudflare records are built
+from, so the DNS it'd wait on doesn't exist yet at creation time).
+Verification happens asynchronously; check the Amplify console or a
+follow-up `terraform plan` rather than trusting `apply`'s exit code for
+that one resource.
 
 ## Validating without AWS credentials
 
