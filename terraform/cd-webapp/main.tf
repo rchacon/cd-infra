@@ -284,8 +284,18 @@ resource "aws_amplify_app" "cd_webapp" {
   # SPA-routing fix) matches any path without a recognized static-file
   # extension and rewrites to index.html unconditionally -- no dependency
   # on origin 404 behavior, no intermediate redirect to dodge.
+  #
+  # "webp" added to AWS's own documented extension list -- confirmed
+  # broken in production without it: cd-webapp's landing-page logo is a
+  # <picture> element with a .webp <source> (PNG <img> fallback), and the
+  # webp request was getting caught by this rule and rewritten to
+  # index.html (text/html instead of an actual image) since webp isn't in
+  # AWS's example list at all, silently breaking that image while the png
+  # fallback still worked -- exactly the kind of gap this unconditional
+  # rule needs to be exhaustive about, unlike the old 404-200 rule it
+  # replaced.
   custom_rule {
-    source = "</^[^.]+$|\\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|ttf|map|json)$)([^.]+$)/>"
+    source = "</^[^.]+$|\\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|ttf|map|json|webp)$)([^.]+$)/>"
     target = "/index.html"
     status = "200"
   }
