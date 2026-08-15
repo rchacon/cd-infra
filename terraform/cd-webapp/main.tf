@@ -234,11 +234,17 @@ resource "aws_amplify_app" "cd_webapp" {
   # unconventional. cd-server's URL isn't set here yet -- that Lambda/API
   # Gateway doesn't exist yet (see terraform/README.md's cd-webapp/
   # section for the follow-up apply once ../cd-server/ is provisioned).
+  #
+  # Only client_id/domain -- cd-webapp#3's hand-rolled OAuth2 flow talks
+  # directly to Managed Login's HTTP endpoints (/login, /oauth2/token,
+  # /logout) and only needs those two to build its URLs. No region or user
+  # pool ID: those only matter for direct Cognito Identity Provider API
+  # calls (e.g. the AWS SDK or Amplify's Auth module), which this
+  # implementation deliberately avoids -- confirmed unused across every
+  # file in that PR before removing them here.
   environment_variables = {
-    VITE_COGNITO_USER_POOL_ID = aws_cognito_user_pool.cd_webapp.id
-    VITE_COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.cd_webapp_prod.id
-    VITE_COGNITO_DOMAIN       = var.cognito_domain_name
-    VITE_AWS_REGION           = var.aws_region
+    VITE_COGNITO_CLIENT_ID = aws_cognito_user_pool_client.cd_webapp_prod.id
+    VITE_COGNITO_DOMAIN    = var.cognito_domain_name
   }
 
   build_spec = <<-YAML
