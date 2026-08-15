@@ -465,6 +465,60 @@ After both passes, verify `civicdog.com`, `www.civicdog.com`, and
 critically -- send a test email to a `civicdog.com` address to confirm the
 Google Workspace records were never touched.
 
+## `cd-portal/` -- Amplify Hosting + Cognito
+
+`cd-portal` is the customer portal (`rchacon/cd-portal`, React + TypeScript
++ Vite -- a separate, dedicated repo, not part of `cd-website`'s monorepo)
+where customers sign up for an API key, view their usage, and pay their
+bill. This directory provisions its Amplify Hosting app/branch and a
+Cognito User Pool + App Client for customer auth -- unlike `amplify/`'s two
+apps, `cd-portal` has no `AMPLIFY_MONOREPO_APP_ROOT`/`applications:` build
+spec wrapper, just a plain single-app one, since it isn't sharing a repo
+with anything else.
+
+**No custom domain yet** -- this directory intentionally stops at the
+default `*.amplifyapp.com` URL for now, same staged-rollout reasoning as
+`amplify/`'s two-pass apply below. Adding `portal.civicdog.com` (or
+whichever subdomain is chosen) plus the matching Cloudflare records is a
+separate follow-up, once the app itself is confirmed working.
+
+Auth is AWS Cognito, not a self-rolled scheme -- the User Pool's App Client
+is a public client (no secret; can't be kept confidential in a
+browser-delivered app) using `ALLOW_USER_SRP_AUTH` so the password itself
+is never transmitted to Cognito's API. Email verification currently goes
+through Cognito's own built-in ("`COGNITO_DEFAULT`") sending, which has a
+low daily quota not meant for real signup volume -- move to SES before
+that becomes a real constraint.
+
+**One manual, one-time prerequisite**, same requirement as `amplify/`'s:
+
+1. **Authorize the AWS Amplify GitHub App** for `rchacon/cd-portal` -- AWS
+   Amplify console, same steps as `amplify/`'s prerequisite above. This is
+   a separate authorization from `cd-website`'s -- GitHub App installs are
+   per-repository.
+
+```bash
+cd terraform/cd-portal
+cat > backend.hcl <<EOF
+bucket  = "<state_bucket_name from bootstrap output>"
+key     = "cd-portal/terraform.tfstate"
+region  = "us-west-2"
+encrypt = true
+EOF
+cat > terraform.tfvars <<EOF
+state_bucket_name   = "<state_bucket_name from bootstrap output>"
+github_access_token = "<PAT, scope admin:repo_hook -- see amplify/'s section above for why one's needed at all>"
+EOF
+
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+```
+
+After applying, confirm `terraform output cd_portal_default_domain`
+resolves and builds/deploys correctly before wiring up `cd-server` (once
+that directory exists) or a custom domain against it.
+
 ## Validating without AWS credentials
 
 `terraform fmt -check -recursive` and `terraform validate` (after
