@@ -412,6 +412,14 @@ only the specific records Amplify needs and never anything email-related.
    or Account settings -> GitHub connections -> Authorize. This is an
    account-level connection Terraform's `aws_amplify_app` resources rely on
    already existing; there's no way to script GitHub's OAuth consent step.
+   **Getting the App authorized isn't sufficient on its own** -- it also
+   has its own separate repository access list (GitHub -> Settings ->
+   Installations -> the AWS Amplify app's configuration) that each
+   individual repo needs added to explicitly. Confirmed the hard way on
+   `cd-webapp/`'s setup: the App being authorized for the account didn't
+   mean it could actually access a newly-added repo, and the resulting
+   build failure (`Unable to assume specified IAM Role`) pointed
+   nowhere near the real cause.
 2. **Create a Cloudflare API token** scoped to `Zone:DNS:Edit` for the
    `civicdog.com` zone only (Cloudflare dashboard -> My Profile -> API
    Tokens -> Create Token -> "Edit zone DNS" template -- never the legacy
@@ -503,9 +511,16 @@ provider block (`aws.us_east_1`) purely for this one certificate.
 **Two manual, one-time prerequisites**, same requirements as `amplify/`'s:
 
 1. **Authorize the AWS Amplify GitHub App** for `rchacon/cd-webapp` -- AWS
-   Amplify console, same steps as `amplify/`'s prerequisite above. This is
-   a separate authorization from `cd-website`'s -- GitHub App installs are
-   per-repository.
+   Amplify console, same steps as `amplify/`'s prerequisite above. **This
+   isn't just an AWS-side step**: confirmed the hard way (a real
+   `terraform apply` succeeded, but the very first build then failed with
+   `Unable to assume specified IAM Role` -- a red herring; nothing to do
+   with IAM at all) -- the GitHub App install itself has its own
+   repository access list (GitHub -> Settings -> Installations -> the AWS
+   Amplify app's configuration), separate from AWS's own
+   authorization/connection flow. `rchacon/cd-website` being on that list
+   already doesn't cover `rchacon/cd-webapp` -- it has to be added
+   explicitly, every time a new repo is wired up.
 2. **Create a Cloudflare API token** scoped to `Zone:DNS:Edit` for the
    `civicdog.com` zone -- reuse the same token `amplify/` uses if you still
    have it (same scope, same zone), or generate a new one the same way
