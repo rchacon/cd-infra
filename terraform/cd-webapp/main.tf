@@ -7,8 +7,8 @@
 # send quota not meant for real production traffic; move to SES before
 # meaningful signup volume, same kind of MVP-stopgap flag as ../cd-api/'s
 # static API key.
-resource "aws_cognito_user_pool" "cd_portal" {
-  name = "cd-platform-cd-portal"
+resource "aws_cognito_user_pool" "cd_webapp" {
+  name = "cd-platform-cd-webapp"
 
   # Explicit rather than relying on the provider/AWS default (which is
   # ESSENTIALS for new pools as of this writing anyway) -- spelled out here
@@ -45,15 +45,15 @@ resource "aws_cognito_user_pool" "cd_portal" {
 }
 
 # Public client -- no secret, since this is called directly from the
-# browser (cd-portal's React app), where a client secret can't be kept
+# browser (cd-webapp's React app), where a client secret can't be kept
 # confidential anyway. Login goes through Managed Login (below) via the
 # OAuth2 Authorization Code grant -- the app redirects to
 # auth.civicdog.com, never calls InitiateAuth/SRP directly, so only
 # ALLOW_REFRESH_TOKEN_AUTH is needed here (to renew a session silently
 # without a full re-login).
-resource "aws_cognito_user_pool_client" "cd_portal" {
-  name         = "cd-platform-cd-portal-web"
-  user_pool_id = aws_cognito_user_pool.cd_portal.id
+resource "aws_cognito_user_pool_client" "cd_webapp" {
+  name         = "cd-platform-cd-webapp-web"
+  user_pool_id = aws_cognito_user_pool.cd_webapp.id
 
   generate_secret = false
 
@@ -71,7 +71,7 @@ resource "aws_cognito_user_pool_client" "cd_portal" {
   supported_identity_providers         = ["COGNITO"]
 
   # Only the custom-domain URL -- NOT also the Amplify default *.amplifyapp.com
-  # domain: referencing aws_amplify_app.cd_portal.default_domain here would
+  # domain: referencing aws_amplify_app.cd_webapp.default_domain here would
   # create a cycle, since the app's own environment_variables below already
   # reference this client's id (confirmed the hard way, via a real
   # `terraform validate` cycle error). Managed Login therefore can't be
@@ -79,7 +79,7 @@ resource "aws_cognito_user_pool_client" "cd_portal" {
   # has verified -- add the *.amplifyapp.com URL back as a manually
   # -maintained second callback/logout entry later if that staging gap
   # turns out to matter. /callback is a placeholder path; confirm it
-  # matches whatever route cd-portal's own router actually implements once
+  # matches whatever route cd-webapp's own router actually implements once
   # that code exists.
   callback_urls = ["https://app.${var.domain_name}/callback"]
   logout_urls   = ["https://app.${var.domain_name}/"]
@@ -130,10 +130,10 @@ resource "aws_acm_certificate_validation" "cognito_domain" {
 # hosted UI) rather than 0 (the classic Hosted UI) -- both are available on
 # Essentials, but Managed Login is what was actually asked for and is the
 # non-deprecated path going forward.
-resource "aws_cognito_user_pool_domain" "cd_portal" {
+resource "aws_cognito_user_pool_domain" "cd_webapp" {
   domain          = var.cognito_domain_name
   certificate_arn = aws_acm_certificate_validation.cognito_domain.certificate_arn
-  user_pool_id    = aws_cognito_user_pool.cd_portal.id
+  user_pool_id    = aws_cognito_user_pool.cd_webapp.id
 
   managed_login_version = 1
 }
@@ -147,7 +147,7 @@ resource "cloudflare_record" "cognito_domain" {
   zone_id = var.cloudflare_zone_id
   name    = "auth"
   type    = "CNAME"
-  content = aws_cognito_user_pool_domain.cd_portal.cloudfront_distribution
+  content = aws_cognito_user_pool_domain.cd_webapp.cloudfront_distribution
   ttl     = 300
   # Grey-cloud, same reasoning as every other CloudFront-backed record in
   # this repo (already backed by CloudFront; stacking Cloudflare's proxy on
@@ -155,15 +155,15 @@ resource "cloudflare_record" "cognito_domain" {
   proxied = false
 }
 
-# --- Amplify: cd-portal's React frontend ----------------------------------
+# --- Amplify: cd-webapp's React frontend ----------------------------------
 #
 # A dedicated, non-monorepo repo -- unlike ../amplify/'s two cd-website
-# apps, cd-portal has no AMPLIFY_MONOREPO_APP_ROOT/`applications:` wrapper
+# apps, cd-webapp has no AMPLIFY_MONOREPO_APP_ROOT/`applications:` wrapper
 # to deal with, just a plain single-app build_spec. Confirmed against the
 # real repo's package.json: Vite + React + TypeScript, `npm run build` runs
 # `tsc -b && vite build`, output directory is Vite's default `dist`.
-resource "aws_amplify_app" "cd_portal" {
-  name         = "cd-portal"
+resource "aws_amplify_app" "cd_webapp" {
+  name         = "cd-webapp"
   repository   = var.github_repository
   access_token = var.github_access_token
   platform     = "WEB"
@@ -172,11 +172,11 @@ resource "aws_amplify_app" "cd_portal" {
   # client-side code (https://vite.dev/guide/env-and-mode) -- anything
   # without that prefix is invisible to the built bundle, not just
   # unconventional. cd-server's URL isn't set here yet -- that Lambda/API
-  # Gateway doesn't exist yet (see terraform/README.md's cd-portal/
+  # Gateway doesn't exist yet (see terraform/README.md's cd-webapp/
   # section for the follow-up apply once ../cd-server/ is provisioned).
   environment_variables = {
-    VITE_COGNITO_USER_POOL_ID = aws_cognito_user_pool.cd_portal.id
-    VITE_COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.cd_portal.id
+    VITE_COGNITO_USER_POOL_ID = aws_cognito_user_pool.cd_webapp.id
+    VITE_COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.cd_webapp.id
     VITE_COGNITO_DOMAIN       = var.cognito_domain_name
     VITE_AWS_REGION           = var.aws_region
   }
@@ -220,8 +220,8 @@ resource "aws_amplify_app" "cd_portal" {
   }
 }
 
-resource "aws_amplify_branch" "cd_portal_main" {
-  app_id      = aws_amplify_app.cd_portal.id
+resource "aws_amplify_branch" "cd_webapp_main" {
+  app_id      = aws_amplify_app.cd_webapp.id
   branch_name = "main"
 
   enable_auto_build = true
@@ -239,13 +239,13 @@ resource "aws_amplify_branch" "cd_portal_main" {
 # doesn't exist yet at the moment this is created. Verification happens
 # asynchronously; check actual status via the Amplify console or a
 # follow-up `terraform plan`, not apply's exit code for this one resource.
-resource "aws_amplify_domain_association" "cd_portal" {
-  app_id                = aws_amplify_app.cd_portal.id
+resource "aws_amplify_domain_association" "cd_webapp" {
+  app_id                = aws_amplify_app.cd_webapp.id
   domain_name           = var.domain_name
   wait_for_verification = false
 
   sub_domain {
-    branch_name = aws_amplify_branch.cd_portal_main.branch_name
+    branch_name = aws_amplify_branch.cd_webapp_main.branch_name
     prefix      = "app"
   }
 }
@@ -260,26 +260,26 @@ resource "aws_amplify_domain_association" "cd_portal" {
 # tolist(...)[0] is enough -- no for+if filtering needed the way
 # ../amplify/'s multi-prefix "site" app needs.
 locals {
-  cd_portal_cert_verification = split(" ", aws_amplify_domain_association.cd_portal.certificate_verification_dns_record)
-  cd_portal_sub_record        = split(" ", tolist(aws_amplify_domain_association.cd_portal.sub_domain)[0].dns_record)
+  cd_webapp_cert_verification = split(" ", aws_amplify_domain_association.cd_webapp.certificate_verification_dns_record)
+  cd_webapp_sub_record        = split(" ", tolist(aws_amplify_domain_association.cd_webapp.sub_domain)[0].dns_record)
 }
 
-resource "cloudflare_record" "cd_portal_cert_verification" {
+resource "cloudflare_record" "cd_webapp_cert_verification" {
   zone_id = var.cloudflare_zone_id
-  name    = local.cd_portal_cert_verification[0]
-  type    = local.cd_portal_cert_verification[1]
+  name    = local.cd_webapp_cert_verification[0]
+  type    = local.cd_webapp_cert_verification[1]
   # trimsuffix: AWS returns this as a fully-qualified value with a trailing
   # "." that Cloudflare doesn't store as part of `content`.
-  content = trimsuffix(local.cd_portal_cert_verification[2], ".")
+  content = trimsuffix(local.cd_webapp_cert_verification[2], ".")
   ttl     = 300
   proxied = false
 }
 
-resource "cloudflare_record" "cd_portal_sub" {
+resource "cloudflare_record" "cd_webapp_sub" {
   zone_id = var.cloudflare_zone_id
   name    = "app"
-  type    = local.cd_portal_sub_record[1]
-  content = trimsuffix(local.cd_portal_sub_record[2], ".")
+  type    = local.cd_webapp_sub_record[1]
+  content = trimsuffix(local.cd_webapp_sub_record[2], ".")
   ttl     = 300
   # Grey-cloud (DNS-only) -- Amplify already fronts this with its own
   # CloudFront distribution and manages its own ACM certificate; stacking

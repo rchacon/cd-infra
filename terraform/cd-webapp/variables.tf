@@ -14,16 +14,16 @@ variable "state_bucket_name" {
 }
 
 variable "github_repository" {
-  description = "GitHub repository URL the cd-portal Amplify app builds from. Requires the AWS Amplify GitHub App to already be installed/authorized for this repo (one-time manual step, see terraform/README.md) -- confirmed working for ../amplify/'s cd-website apps, not yet confirmed for this new repo."
+  description = "GitHub repository URL the cd-webapp Amplify app builds from. Requires the AWS Amplify GitHub App to already be installed/authorized for this repo (one-time manual step, see terraform/README.md) -- confirmed working for ../amplify/'s cd-website apps, not yet confirmed for this new repo."
   type        = string
-  default     = "https://github.com/rchacon/cd-portal"
+  default     = "https://github.com/rchacon/cd-webapp"
 }
 
 # See ../amplify/variables.tf's identical variable for the full "why a
 # token is required even with the GitHub App already installed" story --
 # same one-time CreateApp-webhook-registration-only credential, scope
 # admin:repo_hook. Reuses the same PAT ../amplify/ uses if it has admin
-# rights on rchacon/cd-portal too; otherwise this needs its own token.
+# rights on rchacon/cd-webapp too; otherwise this needs its own token.
 variable "github_access_token" {
   description = "GitHub personal access token (classic), scope: admin:repo_hook only. One-time bootstrapping credential for CreateApp's webhook registration."
   type        = string
@@ -35,7 +35,7 @@ variable "github_access_token" {
 # implicit default) so it's visible in one place without cross-referencing
 # AWS docs.
 variable "cognito_password_minimum_length" {
-  description = "Minimum password length enforced by the cd-portal Cognito User Pool."
+  description = "Minimum password length enforced by the cd-webapp Cognito User Pool."
   type        = number
   default     = 8
 }
@@ -54,13 +54,13 @@ variable "cloudflare_zone_id" {
   type        = string
 }
 
-# The apex domain cd-portal's subdomain is provisioned under -- civicdog.com
+# The apex domain cd-webapp's subdomain is provisioned under -- civicdog.com
 # is registered outside AWS, so this can't be inferred from anything
 # Terraform already manages. Same variable shape as ../amplify/'s, though
 # that module's default value isn't reused here on purpose (a typo in one
 # shouldn't silently propagate to the other).
 variable "domain_name" {
-  description = "The apex domain cd-portal's subdomain is provisioned under."
+  description = "The apex domain cd-webapp's subdomain is provisioned under."
   type        = string
   default     = "civicdog.com"
 }
