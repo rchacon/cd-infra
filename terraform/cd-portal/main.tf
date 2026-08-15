@@ -200,6 +200,21 @@ resource "aws_amplify_app" "cd_portal" {
           - node_modules/**/*
   YAML
 
+  # SPA fallback rewrite -- there's both an unauthenticated experience
+  # (public pages) and an authenticated one on app.civicdog.com, plus
+  # Managed Login's own /callback redirect target, all handled by
+  # client-side routing inside the one built bundle. Without this, Amplify
+  # Hosting only serves exact-match files -- any direct navigation or
+  # refresh on a client-side route (including the OAuth callback) 404s
+  # instead of falling through to index.html for React Router to handle.
+  # 404-200 (not a real redirect) so the browser's URL bar/history stays on
+  # the originally-requested path.
+  custom_rule {
+    source = "/<*>"
+    target = "/index.html"
+    status = "404-200"
+  }
+
   tags = {
     Project = "cd-platform"
   }
