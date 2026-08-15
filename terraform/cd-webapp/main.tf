@@ -90,9 +90,9 @@ resource "aws_cognito_user_pool_client" "cd_webapp_prod" {
   # end-to-end tested until app.civicdog.com's domain association (above)
   # has verified -- add the *.amplifyapp.com URL back as a manually
   # -maintained second callback/logout entry later if that staging gap
-  # turns out to matter. /callback is a placeholder path; confirm it
-  # matches whatever route cd-webapp's own router actually implements once
-  # that code exists.
+  # turns out to matter. /callback is confirmed correct against the real
+  # app's router (cd-webapp#3's src/auth/config.ts builds
+  # `${window.location.origin}/callback`), not a placeholder anymore.
   callback_urls = ["https://app.${var.domain_name}/callback"]
   logout_urls   = ["https://app.${var.domain_name}/"]
 
@@ -234,11 +234,17 @@ resource "aws_amplify_app" "cd_webapp" {
   # unconventional. cd-server's URL isn't set here yet -- that Lambda/API
   # Gateway doesn't exist yet (see terraform/README.md's cd-webapp/
   # section for the follow-up apply once ../cd-server/ is provisioned).
+  #
+  # Only client_id/domain -- cd-webapp#3's hand-rolled OAuth2 flow talks
+  # directly to Managed Login's HTTP endpoints (/login, /oauth2/token,
+  # /logout) and only needs those two to build its URLs. No region or user
+  # pool ID: those only matter for direct Cognito Identity Provider API
+  # calls (e.g. the AWS SDK or Amplify's Auth module), which this
+  # implementation deliberately avoids -- confirmed unused across every
+  # file in that PR before removing them here.
   environment_variables = {
-    VITE_COGNITO_USER_POOL_ID = aws_cognito_user_pool.cd_webapp.id
-    VITE_COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.cd_webapp_prod.id
-    VITE_COGNITO_DOMAIN       = var.cognito_domain_name
-    VITE_AWS_REGION           = var.aws_region
+    VITE_COGNITO_CLIENT_ID = aws_cognito_user_pool_client.cd_webapp_prod.id
+    VITE_COGNITO_DOMAIN    = var.cognito_domain_name
   }
 
   build_spec = <<-YAML
