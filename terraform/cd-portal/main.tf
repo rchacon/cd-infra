@@ -10,6 +10,13 @@
 resource "aws_cognito_user_pool" "cd_portal" {
   name = "cd-platform-cd-portal"
 
+  # Explicit rather than relying on the provider/AWS default (which is
+  # ESSENTIALS for new pools as of this writing anyway) -- spelled out here
+  # so a future AWS default change can't silently move this pool to a
+  # different tier/price point. Essentials, not Lite, since Managed Login
+  # (below) needs it -- Lite's cheaper per-MAU rate doesn't include it.
+  user_pool_tier = "ESSENTIALS"
+
   username_attributes      = ["email"]
   auto_verified_attributes = ["email"]
 
@@ -39,10 +46,11 @@ resource "aws_cognito_user_pool" "cd_portal" {
 
 # Public client -- no secret, since this is called directly from the
 # browser (cd-portal's React app), where a client secret can't be kept
-# confidential anyway. ALLOW_USER_SRP_AUTH (not ALLOW_USER_PASSWORD_AUTH)
-# so the password itself is never sent to Cognito's API, only a
-# zero-knowledge proof of it -- ALLOW_REFRESH_TOKEN_AUTH lets the app renew
-# a session without re-prompting for credentials.
+# confidential anyway. Login goes through Managed Login (below) via the
+# OAuth2 Authorization Code grant -- the app redirects to
+# auth.civicdog.com, never calls InitiateAuth/SRP directly, so only
+# ALLOW_REFRESH_TOKEN_AUTH is needed here (to renew a session silently
+# without a full re-login).
 resource "aws_cognito_user_pool_client" "cd_portal" {
   name         = "cd-platform-cd-portal-web"
   user_pool_id = aws_cognito_user_pool.cd_portal.id
@@ -50,9 +58,31 @@ resource "aws_cognito_user_pool_client" "cd_portal" {
   generate_secret = false
 
   explicit_auth_flows = [
-    "ALLOW_USER_SRP_AUTH",
     "ALLOW_REFRESH_TOKEN_AUTH",
   ]
+
+  # Authorization Code grant, not Implicit -- the code exchange happens
+  # over a direct HTTPS call from the app to Cognito's /oauth2/token
+  # endpoint, so tokens are never exposed in a browser URL/history the way
+  # Implicit's fragment-based response is.
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["code"]
+  allowed_oauth_scopes                 = ["openid", "email", "profile"]
+  supported_identity_providers         = ["COGNITO"]
+
+  # Only the custom-domain URL -- NOT also the Amplify default *.amplifyapp.com
+  # domain: referencing aws_amplify_app.cd_portal.default_domain here would
+  # create a cycle, since the app's own environment_variables below already
+  # reference this client's id (confirmed the hard way, via a real
+  # `terraform validate` cycle error). Managed Login therefore can't be
+  # end-to-end tested until portal.civicdog.com's domain association
+  # (above) has verified -- add the *.amplifyapp.com URL back as a manually
+  # -maintained second callback/logout entry later if that staging gap
+  # turns out to matter. /callback is a placeholder path; confirm it
+  # matches whatever route cd-portal's own router actually implements once
+  # that code exists.
+  callback_urls = ["https://portal.${var.domain_name}/callback"]
+  logout_urls   = ["https://portal.${var.domain_name}/"]
 
   access_token_validity  = 1
   id_token_validity      = 1
@@ -63,6 +93,66 @@ resource "aws_cognito_user_pool_client" "cd_portal" {
     id_token      = "hours"
     refresh_token = "days"
   }
+}
+
+# --- Cognito Managed Login: auth.civicdog.com -----------------------------
+
+resource "aws_acm_certificate" "cognito_domain" {
+  provider          = aws.us_east_1
+  domain_name       = var.cognito_domain_name
+  validation_method = "DNS"
+
+  tags = {
+    Project = "cd-platform"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "cloudflare_record" "cognito_domain_validation" {
+  zone_id = var.cloudflare_zone_id
+  name    = trimsuffix(tolist(aws_acm_certificate.cognito_domain.domain_validation_options)[0].resource_record_name, ".")
+  type    = tolist(aws_acm_certificate.cognito_domain.domain_validation_options)[0].resource_record_type
+  content = trimsuffix(tolist(aws_acm_certificate.cognito_domain.domain_validation_options)[0].resource_record_value, ".")
+  ttl     = 300
+  proxied = false
+}
+
+resource "aws_acm_certificate_validation" "cognito_domain" {
+  provider                = aws.us_east_1
+  certificate_arn         = aws_acm_certificate.cognito_domain.arn
+  validation_record_fqdns = [cloudflare_record.cognito_domain_validation.hostname]
+}
+
+# managed_login_version = 1 opts into Managed Login (the newer, brandable
+# hosted UI) rather than 0 (the classic Hosted UI) -- both are available on
+# Essentials, but Managed Login is what was actually asked for and is the
+# non-deprecated path going forward.
+resource "aws_cognito_user_pool_domain" "cd_portal" {
+  domain          = var.cognito_domain_name
+  certificate_arn = aws_acm_certificate_validation.cognito_domain.certificate_arn
+  user_pool_id    = aws_cognito_user_pool.cd_portal.id
+
+  managed_login_version = 1
+}
+
+# cloudfront_distribution: the domain name of the CloudFront distribution
+# Cognito provisions for this custom domain -- confirm this exact attribute
+# name against the installed aws provider version at plan time (an older
+# provider generation exposed this as cloudfront_distribution_arn, an ARN
+# rather than a hostname, which wouldn't work directly as a CNAME target).
+resource "cloudflare_record" "cognito_domain" {
+  zone_id = var.cloudflare_zone_id
+  name    = "auth"
+  type    = "CNAME"
+  content = aws_cognito_user_pool_domain.cd_portal.cloudfront_distribution
+  ttl     = 300
+  # Grey-cloud, same reasoning as every other CloudFront-backed record in
+  # this repo (already backed by CloudFront; stacking Cloudflare's proxy on
+  # top is two CDNs for no benefit and risks breaking domain verification).
+  proxied = false
 }
 
 # --- Amplify: cd-portal's React frontend ----------------------------------
@@ -87,6 +177,7 @@ resource "aws_amplify_app" "cd_portal" {
   environment_variables = {
     VITE_COGNITO_USER_POOL_ID = aws_cognito_user_pool.cd_portal.id
     VITE_COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.cd_portal.id
+    VITE_COGNITO_DOMAIN       = var.cognito_domain_name
     VITE_AWS_REGION           = var.aws_region
   }
 

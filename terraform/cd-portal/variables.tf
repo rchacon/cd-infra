@@ -64,3 +64,9 @@ variable "domain_name" {
   type        = string
   default     = "civicdog.com"
 }
+
+variable "cognito_domain_name" {
+  description = "Custom domain for Cognito Managed Login (the hosted sign-in/sign-up pages)."
+  type        = string
+  default     = "auth.civicdog.com"
+}

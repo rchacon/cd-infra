@@ -477,13 +477,26 @@ and a Cognito User Pool + App Client for customer auth -- unlike
 `AMPLIFY_MONOREPO_APP_ROOT`/`applications:` build spec wrapper, just a
 plain single-app one, since it isn't sharing a repo with anything else.
 
-Auth is AWS Cognito, not a self-rolled scheme -- the User Pool's App Client
-is a public client (no secret; can't be kept confidential in a
-browser-delivered app) using `ALLOW_USER_SRP_AUTH` so the password itself
-is never transmitted to Cognito's API. Email verification currently goes
-through Cognito's own built-in ("`COGNITO_DEFAULT`") sending, which has a
-low daily quota not meant for real signup volume -- move to SES before
-that becomes a real constraint.
+Auth is AWS Cognito, not a self-rolled scheme, on the **Essentials** feature
+plan (explicit in Terraform, not left to whatever AWS defaults new pools
+to) -- Essentials is the minimum tier that unlocks **Managed Login**, the
+brandable hosted sign-in/sign-up UI at `auth.civicdog.com`
+(`aws_cognito_user_pool_domain`, `managed_login_version = 1`, not the
+older/classic Hosted UI). `cd-portal`'s App Client is a public client (no
+secret; can't be kept confidential in a browser-delivered app) using the
+OAuth2 Authorization Code grant -- the app redirects to
+`auth.civicdog.com`, never calls Cognito's `InitiateAuth`/SRP APIs
+directly, so `explicit_auth_flows` only needs `ALLOW_REFRESH_TOKEN_AUTH`
+(silent session renewal). Email verification currently goes through
+Cognito's own built-in ("`COGNITO_DEFAULT`") sending, which has a low daily
+quota not meant for real signup volume -- move to SES before that becomes
+a real constraint.
+
+`auth.civicdog.com`'s ACM certificate is provisioned in `us-east-1`
+regardless of `var.aws_region` -- Managed Login custom domains are
+CloudFront-backed, same constraint as `cd-api/`'s `api.civicdog.com` and
+`amplify/`'s Amplify-managed certs, requiring a second, aliased `aws`
+provider block (`aws.us_east_1`) purely for this one certificate.
 
 **Two manual, one-time prerequisites**, same requirements as `amplify/`'s:
 
@@ -520,18 +533,22 @@ terraform apply
 **Apply this in two passes rather than all at once**, same reasoning as
 `amplify/`'s two-pass note above -- it touches the live `civicdog.com` zone:
 
-1. First, apply just the app/branch/Cognito resources (e.g. `terraform
-   apply -target=aws_amplify_app.cd_portal
+1. First, apply just the app/branch/Cognito-pool-and-client resources
+   (e.g. `terraform apply -target=aws_amplify_app.cd_portal
    -target=aws_amplify_branch.cd_portal_main
    -target=aws_cognito_user_pool.cd_portal
    -target=aws_cognito_user_pool_client.cd_portal`). Confirm
    `terraform output cd_portal_default_domain` builds and deploys
-   successfully on its `*.amplifyapp.com` URL -- zero DNS risk.
-2. Once confirmed, apply the rest (`aws_amplify_domain_association` +
-   the two `cloudflare_record` resources). Verify `portal.civicdog.com`
-   resolves over HTTPS afterward -- these records are additive and don't
-   touch the zone's existing MX/SPF/DKIM records, but a second deliberate
-   step keeps the blast radius small regardless.
+   successfully on its `*.amplifyapp.com` URL -- zero DNS risk. (Managed
+   Login itself can't be end-to-end tested yet at this point -- its
+   callback/logout URLs only point at `portal.civicdog.com`, which doesn't
+   resolve until step 2.)
+2. Once confirmed, apply the rest: `portal.civicdog.com`'s
+   `aws_amplify_domain_association` + its two `cloudflare_record`s, and
+   `auth.civicdog.com`'s ACM cert + validation + `aws_cognito_user_pool_domain`
+   + its `cloudflare_record`. All of these are additive and don't touch the
+   zone's existing MX/SPF/DKIM records, but a second deliberate step keeps
+   the blast radius small regardless.
 
 `aws_amplify_domain_association.cd_portal` is created with
 `wait_for_verification = false` -- same reason as `amplify/`'s two
@@ -539,7 +556,11 @@ associations (its own outputs are what the Cloudflare records are built
 from, so the DNS it'd wait on doesn't exist yet at creation time).
 Verification happens asynchronously; check the Amplify console or a
 follow-up `terraform plan` rather than trusting `apply`'s exit code for
-that one resource.
+that one resource. `aws_cognito_user_pool_domain.cd_portal`'s
+`cloudflare_record` similarly can't be created until the domain resource
+exists and returns its CloudFront distribution hostname -- confirm the
+exact computed attribute name (`cloudfront_distribution` as written here)
+against the installed `aws` provider version at plan time.
 
 ## Validating without AWS credentials
 

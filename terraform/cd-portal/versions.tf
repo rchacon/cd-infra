@@ -25,6 +25,16 @@ provider "aws" {
   region = var.aws_region
 }
 
+# Cognito Managed Login custom domains are backed by CloudFront, same as
+# API Gateway's EDGE endpoints -- see ../cd-api/versions.tf's identical
+# alias/comment. Confirmed via AWS's own aws_cognito_user_pool_domain docs,
+# not just the API Gateway analogy. Used only by the auth.civicdog.com
+# certificate resources below.
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+}
+
 # civicdog.com's DNS stays at Cloudflare -- see ../amplify/versions.tf's
 # identical comment for the full Google Workspace email reasoning. This
 # provider only ever touches portal.civicdog.com's own two records below.

@@ -24,6 +24,11 @@ output "cognito_user_pool_arn" {
 }
 
 output "cognito_user_pool_client_id" {
-  description = "cd-portal's Cognito App Client ID -- consumed by the frontend's Amplify Auth config (also set directly as this app's own VITE_COGNITO_CLIENT_ID env var)."
+  description = "cd-portal's Cognito App Client ID -- used to build the Managed Login authorize URL (also set directly as this app's own VITE_COGNITO_CLIENT_ID env var)."
   value       = aws_cognito_user_pool_client.cd_portal.id
+}
+
+output "cognito_domain_url" {
+  description = "Cognito Managed Login's custom domain URL -- the /login, /signup, /oauth2/authorize etc. endpoints customers get redirected to."
+  value       = "https://${var.cognito_domain_name}"
 }
