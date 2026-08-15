@@ -163,7 +163,7 @@ resource "cloudflare_record" "cognito_domain" {
 # real repo's package.json: Vite + React + TypeScript, `npm run build` runs
 # `tsc -b && vite build`, output directory is Vite's default `dist`.
 resource "aws_amplify_app" "cd_webapp" {
-  name         = "cd-webapp"
+  name         = "civicdog-webapp"
   repository   = var.github_repository
   access_token = var.github_access_token
   platform     = "WEB"
