@@ -3,9 +3,16 @@ output "cd_webapp_app_id" {
   value       = aws_amplify_app.cd_webapp.id
 }
 
+# The bare app-id domain (aws_amplify_app.cd_webapp.default_domain alone,
+# e.g. "d21n7yzhk4t7yl.amplifyapp.com") 404s -- confirmed the hard way,
+# after ~10 minutes chasing a phantom CloudFront propagation issue.
+# Amplify's actual per-branch URL always needs the branch name prefixed
+# (https://<branch>.<app-id>.amplifyapp.com/); this output includes it so
+# `terraform output` hands back something directly usable instead of a
+# domain suffix that silently needs manual completion.
 output "cd_webapp_default_domain" {
-  description = "cd-webapp's default *.amplifyapp.com URL -- useful for confirming a deploy works independent of DNS/domain-association status."
-  value       = aws_amplify_app.cd_webapp.default_domain
+  description = "cd-webapp's default, directly-navigable *.amplifyapp.com URL for the main branch -- useful for confirming a deploy works independent of DNS/domain-association status."
+  value       = "https://${aws_amplify_branch.cd_webapp_main.branch_name}.${aws_amplify_app.cd_webapp.default_domain}"
 }
 
 output "cd_webapp_url" {
