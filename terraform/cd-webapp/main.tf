@@ -162,6 +162,20 @@ resource "cloudflare_record" "cognito_domain" {
 # to deal with, just a plain single-app build_spec. Confirmed against the
 # real repo's package.json: Vite + React + TypeScript, `npm run build` runs
 # `tsc -b && vite build`, output directory is Vite's default `dist`.
+#
+# A build against this app failed with "Unable to assume specified IAM
+# Role" before even cloning the repo, despite no role being configured
+# anywhere on the app (confirmed via the Amplify console's own IAM roles
+# page -- both "Service role" and "Compute role" showed "No ... role
+# set"). ../amplify/'s two older apps (created 2026-08-04) don't show
+# this. Tried adding an explicit iam_service_role_arn with AWS's
+# AdministratorAccess-Amplify managed policy, but that policy is
+# account-wide administrative access (not scoped per-app, includes IAM
+# actions) designed for Amplify Gen 1's full-stack backend deployment role
+# -- far broader than a static-hosting-only app like this one needs.
+# Reverted; still unresolved -- needs a narrower fix (a minimally-scoped
+# service role, or whatever the actual AWS-side cause turns out to be)
+# before the first real build can succeed.
 resource "aws_amplify_app" "cd_webapp" {
   name         = "civicdog-webapp"
   repository   = var.github_repository
