@@ -90,9 +90,9 @@ resource "aws_cognito_user_pool_client" "cd_webapp_prod" {
   # end-to-end tested until app.civicdog.com's domain association (above)
   # has verified -- add the *.amplifyapp.com URL back as a manually
   # -maintained second callback/logout entry later if that staging gap
-  # turns out to matter. /callback is a placeholder path; confirm it
-  # matches whatever route cd-webapp's own router actually implements once
-  # that code exists.
+  # turns out to matter. /callback is confirmed correct against the real
+  # app's router (cd-webapp#3's src/auth/config.ts builds
+  # `${window.location.origin}/callback`), not a placeholder anymore.
   callback_urls = ["https://app.${var.domain_name}/callback"]
   logout_urls   = ["https://app.${var.domain_name}/"]
 
