@@ -37,7 +37,7 @@ provider "aws" {
 
 # civicdog.com's DNS stays at Cloudflare -- see ../amplify/versions.tf's
 # identical comment for the full Google Workspace email reasoning. This
-# provider only ever touches portal.civicdog.com's own two records below.
+# provider only ever touches app.civicdog.com's own two records below.
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }

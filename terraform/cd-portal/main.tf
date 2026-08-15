@@ -75,14 +75,14 @@ resource "aws_cognito_user_pool_client" "cd_portal" {
   # create a cycle, since the app's own environment_variables below already
   # reference this client's id (confirmed the hard way, via a real
   # `terraform validate` cycle error). Managed Login therefore can't be
-  # end-to-end tested until portal.civicdog.com's domain association
-  # (above) has verified -- add the *.amplifyapp.com URL back as a manually
+  # end-to-end tested until app.civicdog.com's domain association (above)
+  # has verified -- add the *.amplifyapp.com URL back as a manually
   # -maintained second callback/logout entry later if that staging gap
   # turns out to matter. /callback is a placeholder path; confirm it
   # matches whatever route cd-portal's own router actually implements once
   # that code exists.
-  callback_urls = ["https://portal.${var.domain_name}/callback"]
-  logout_urls   = ["https://portal.${var.domain_name}/"]
+  callback_urls = ["https://app.${var.domain_name}/callback"]
+  logout_urls   = ["https://app.${var.domain_name}/"]
 
   access_token_validity  = 1
   id_token_validity      = 1
@@ -231,7 +231,7 @@ resource "aws_amplify_domain_association" "cd_portal" {
 
   sub_domain {
     branch_name = aws_amplify_branch.cd_portal_main.branch_name
-    prefix      = "portal"
+    prefix      = "app"
   }
 }
 
@@ -241,7 +241,7 @@ resource "aws_amplify_domain_association" "cd_portal" {
 # certificate_verification_dns_record and dns_record, and the same
 # not-trimspace()'d split(" ", ...) parsing -- see ../amplify/main.tf's
 # detailed comment on this for the full story (confirmed there against a
-# real apply). sub_domain is a single-element set here (only "portal"), so
+# real apply). sub_domain is a single-element set here (only "app"), so
 # tolist(...)[0] is enough -- no for+if filtering needed the way
 # ../amplify/'s multi-prefix "site" app needs.
 locals {
@@ -262,7 +262,7 @@ resource "cloudflare_record" "cd_portal_cert_verification" {
 
 resource "cloudflare_record" "cd_portal_sub" {
   zone_id = var.cloudflare_zone_id
-  name    = "portal"
+  name    = "app"
   type    = local.cd_portal_sub_record[1]
   content = trimsuffix(local.cd_portal_sub_record[2], ".")
   ttl     = 300

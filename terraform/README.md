@@ -470,7 +470,7 @@ Google Workspace records were never touched.
 `cd-portal` is the customer portal (`rchacon/cd-portal`, React + TypeScript
 + Vite -- a separate, dedicated repo, not part of `cd-website`'s monorepo)
 where customers sign up for an API key, view their usage, and pay their
-bill, deployed to `portal.civicdog.com`. This directory provisions its
+bill, deployed to `app.civicdog.com`. This directory provisions its
 Amplify Hosting app/branch/domain association, its Cloudflare DNS records,
 and a Cognito User Pool + App Client for customer auth -- unlike
 `amplify/`'s two apps, `cd-portal` has no
@@ -541,9 +541,9 @@ terraform apply
    `terraform output cd_portal_default_domain` builds and deploys
    successfully on its `*.amplifyapp.com` URL -- zero DNS risk. (Managed
    Login itself can't be end-to-end tested yet at this point -- its
-   callback/logout URLs only point at `portal.civicdog.com`, which doesn't
+   callback/logout URLs only point at `app.civicdog.com`, which doesn't
    resolve until step 2.)
-2. Once confirmed, apply the rest: `portal.civicdog.com`'s
+2. Once confirmed, apply the rest: `app.civicdog.com`'s
    `aws_amplify_domain_association` + its two `cloudflare_record`s, and
    `auth.civicdog.com`'s ACM cert + validation + `aws_cognito_user_pool_domain`
    + its `cloudflare_record`. All of these are additive and don't touch the

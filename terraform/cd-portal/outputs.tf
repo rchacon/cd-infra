@@ -10,7 +10,7 @@ output "cd_portal_default_domain" {
 
 output "cd_portal_url" {
   description = "cd-portal's custom domain URL."
-  value       = "https://portal.${var.domain_name}"
+  value       = "https://app.${var.domain_name}"
 }
 
 output "cognito_user_pool_id" {
