@@ -273,12 +273,21 @@ resource "aws_amplify_app" "cd_webapp" {
   # Hosting only serves exact-match files -- any direct navigation or
   # refresh on a client-side route (including the OAuth callback) 404s
   # instead of falling through to index.html for React Router to handle.
-  # 404-200 (not a real redirect) so the browser's URL bar/history stays on
-  # the originally-requested path.
+  #
+  # NOT the plain "/<*>" -> "/index.html" 404-200 pattern -- confirmed
+  # broken in production (#33): Amplify/CloudFront's edge does its own
+  # trailing-slash "clean URL" normalization (301 /callback -> /callback/)
+  # *before* the 404-200 condition is evaluated, and that redirected
+  # variant isn't reliably caught, so the request fell through to a raw
+  # 404 instead of ever reaching index.html -- broke the OAuth callback
+  # specifically. This unconditional regex rewrite (AWS's own documented
+  # SPA-routing fix) matches any path without a recognized static-file
+  # extension and rewrites to index.html unconditionally -- no dependency
+  # on origin 404 behavior, no intermediate redirect to dodge.
   custom_rule {
-    source = "/<*>"
+    source = "</^[^.]+$|\\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|ttf|map|json)$)([^.]+$)/>"
     target = "/index.html"
-    status = "404-200"
+    status = "200"
   }
 
   tags = {
