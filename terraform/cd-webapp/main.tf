@@ -266,27 +266,28 @@ resource "aws_amplify_domain_association" "cd_webapp" {
 
 # --- Cloudflare DNS records ------------------------------------------------
 #
-# Same 3-field "<name-or-empty> <TYPE> <VALUE>" shape for both
+# Same 3-field "<name-or-empty> <TYPE> <VALUE>" shape for
 # certificate_verification_dns_record and dns_record, and the same
 # not-trimspace()'d split(" ", ...) parsing -- see ../amplify/main.tf's
 # detailed comment on this for the full story (confirmed there against a
 # real apply). sub_domain is a single-element set here (only "app"), so
 # tolist(...)[0] is enough -- no for+if filtering needed the way
 # ../amplify/'s multi-prefix "site" app needs.
+#
+# No cloudflare_record for aws_amplify_domain_association.cd_webapp's own
+# certificate_verification_dns_record -- confirmed via a real apply that
+# it's identical to (and already satisfied by) ../amplify/'s existing
+# root-domain validation record for civicdog.com (ACM reuses one
+# validation CNAME per apex domain across multiple cert requests, same
+# reasoning already documented in ../amplify/main.tf for its site/docs
+# apps sharing one record within that module -- this is the same pattern,
+# just crossing module/state boundaries this time). Terraform tried to
+# create a second, duplicate record for it and Cloudflare rejected it
+# ("DNS record already exists"); the domain association still verified
+# successfully using the pre-existing record, so nothing needs creating
+# here at all.
 locals {
-  cd_webapp_cert_verification = split(" ", aws_amplify_domain_association.cd_webapp.certificate_verification_dns_record)
-  cd_webapp_sub_record        = split(" ", tolist(aws_amplify_domain_association.cd_webapp.sub_domain)[0].dns_record)
-}
-
-resource "cloudflare_record" "cd_webapp_cert_verification" {
-  zone_id = var.cloudflare_zone_id
-  name    = local.cd_webapp_cert_verification[0]
-  type    = local.cd_webapp_cert_verification[1]
-  # trimsuffix: AWS returns this as a fully-qualified value with a trailing
-  # "." that Cloudflare doesn't store as part of `content`.
-  content = trimsuffix(local.cd_webapp_cert_verification[2], ".")
-  ttl     = 300
-  proxied = false
+  cd_webapp_sub_record = split(" ", tolist(aws_amplify_domain_association.cd_webapp.sub_domain)[0].dns_record)
 }
 
 resource "cloudflare_record" "cd_webapp_sub" {
