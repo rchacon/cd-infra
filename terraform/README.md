@@ -3,7 +3,9 @@
 AWS infrastructure for this repo, provisioned incrementally by component:
 `bootstrap/` (state backend, one-time), `networking/` (#1), `rds/` (#2),
 `airflow/` (#3), `cd-api/` (#4), `amplify/` (Hosting for the `cd-website`
-repo's two apps). See #5 for the overall AWS deployment tracking issue.
+repo's two apps), `cd-webapp/` (Amplify Hosting + Cognito for the customer
+portal, `rchacon/cd-webapp`). See #5 for the overall AWS deployment
+tracking issue.
 
 See the root `README.md` for an architecture diagram of the VPC, security
 groups, and planned compute resources.
@@ -410,6 +412,14 @@ only the specific records Amplify needs and never anything email-related.
    or Account settings -> GitHub connections -> Authorize. This is an
    account-level connection Terraform's `aws_amplify_app` resources rely on
    already existing; there's no way to script GitHub's OAuth consent step.
+   **Getting the App authorized isn't sufficient on its own** -- it also
+   has its own separate repository access list (GitHub -> Settings ->
+   Installations -> the AWS Amplify app's configuration) that each
+   individual repo needs added to explicitly. Confirmed the hard way on
+   `cd-webapp/`'s setup: the App being authorized for the account didn't
+   mean it could actually access a newly-added repo, and the resulting
+   build failure (`Unable to assume specified IAM Role`) pointed
+   nowhere near the real cause.
 2. **Create a Cloudflare API token** scoped to `Zone:DNS:Edit` for the
    `civicdog.com` zone only (Cloudflare dashboard -> My Profile -> API
    Tokens -> Create Token -> "Edit zone DNS" template -- never the legacy
@@ -464,6 +474,110 @@ After both passes, verify `civicdog.com`, `www.civicdog.com`, and
 `docs.civicdog.com` all resolve over HTTPS to the right app, and --
 critically -- send a test email to a `civicdog.com` address to confirm the
 Google Workspace records were never touched.
+
+## `cd-webapp/` -- Amplify Hosting + Cognito
+
+`cd-webapp` is the customer portal (`rchacon/cd-webapp`, React + TypeScript
++ Vite -- a separate, dedicated repo, not part of `cd-website`'s monorepo)
+where customers sign up for an API key, view their usage, and pay their
+bill, deployed to `app.civicdog.com`. This directory provisions its
+Amplify Hosting app/branch/domain association, its Cloudflare DNS records,
+and a Cognito User Pool + App Client for customer auth -- unlike
+`amplify/`'s two apps, `cd-webapp` has no
+`AMPLIFY_MONOREPO_APP_ROOT`/`applications:` build spec wrapper, just a
+plain single-app one, since it isn't sharing a repo with anything else.
+
+Auth is AWS Cognito, not a self-rolled scheme, on the **Essentials** feature
+plan (explicit in Terraform, not left to whatever AWS defaults new pools
+to) -- Essentials is the minimum tier that unlocks **Managed Login**, the
+brandable hosted sign-in/sign-up UI at `auth.civicdog.com`
+(`aws_cognito_user_pool_domain`, `managed_login_version = 1`, not the
+older/classic Hosted UI). `cd-webapp`'s App Client is a public client (no
+secret; can't be kept confidential in a browser-delivered app) using the
+OAuth2 Authorization Code grant -- the app redirects to
+`auth.civicdog.com`, never calls Cognito's `InitiateAuth`/SRP APIs
+directly, so `explicit_auth_flows` only needs `ALLOW_REFRESH_TOKEN_AUTH`
+(silent session renewal). Email verification currently goes through
+Cognito's own built-in ("`COGNITO_DEFAULT`") sending, which has a low daily
+quota not meant for real signup volume -- move to SES before that becomes
+a real constraint.
+
+`auth.civicdog.com`'s ACM certificate is provisioned in `us-east-1`
+regardless of `var.aws_region` -- Managed Login custom domains are
+CloudFront-backed, same constraint as `cd-api/`'s `api.civicdog.com` and
+`amplify/`'s Amplify-managed certs, requiring a second, aliased `aws`
+provider block (`aws.us_east_1`) purely for this one certificate.
+
+**Two manual, one-time prerequisites**, same requirements as `amplify/`'s:
+
+1. **Authorize the AWS Amplify GitHub App** for `rchacon/cd-webapp` -- AWS
+   Amplify console, same steps as `amplify/`'s prerequisite above. **This
+   isn't just an AWS-side step**: confirmed the hard way (a real
+   `terraform apply` succeeded, but the very first build then failed with
+   `Unable to assume specified IAM Role` -- a red herring; nothing to do
+   with IAM at all) -- the GitHub App install itself has its own
+   repository access list (GitHub -> Settings -> Installations -> the AWS
+   Amplify app's configuration), separate from AWS's own
+   authorization/connection flow. `rchacon/cd-website` being on that list
+   already doesn't cover `rchacon/cd-webapp` -- it has to be added
+   explicitly, every time a new repo is wired up.
+2. **Create a Cloudflare API token** scoped to `Zone:DNS:Edit` for the
+   `civicdog.com` zone -- reuse the same token `amplify/` uses if you still
+   have it (same scope, same zone), or generate a new one the same way
+   (Cloudflare dashboard -> My Profile -> API Tokens -> "Edit zone DNS"
+   template).
+
+```bash
+cd terraform/cd-webapp
+cat > backend.hcl <<EOF
+bucket  = "<state_bucket_name from bootstrap output>"
+key     = "cd-webapp/terraform.tfstate"
+region  = "us-west-2"
+encrypt = true
+EOF
+cat > terraform.tfvars <<EOF
+state_bucket_name    = "<state_bucket_name from bootstrap output>"
+github_access_token  = "<PAT, scope admin:repo_hook -- see amplify/'s section above for why one's needed at all>"
+cloudflare_api_token = "<token from the Cloudflare API Tokens page>"
+cloudflare_zone_id   = "<zone ID from the Cloudflare dashboard>"
+EOF
+
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+```
+
+**Apply this in two passes rather than all at once**, same reasoning as
+`amplify/`'s two-pass note above -- it touches the live `civicdog.com` zone:
+
+1. First, apply just the app/branch/Cognito-pool-and-client resources
+   (e.g. `terraform apply -target=aws_amplify_app.cd_webapp
+   -target=aws_amplify_branch.cd_webapp_main
+   -target=aws_cognito_user_pool.cd_webapp
+   -target=aws_cognito_user_pool_client.cd_webapp`). Confirm
+   `terraform output cd_webapp_default_domain` builds and deploys
+   successfully on its `*.amplifyapp.com` URL -- zero DNS risk. (Managed
+   Login itself can't be end-to-end tested yet at this point -- its
+   callback/logout URLs only point at `app.civicdog.com`, which doesn't
+   resolve until step 2.)
+2. Once confirmed, apply the rest: `app.civicdog.com`'s
+   `aws_amplify_domain_association` + its two `cloudflare_record`s, and
+   `auth.civicdog.com`'s ACM cert + validation + `aws_cognito_user_pool_domain`
+   + its `cloudflare_record`. All of these are additive and don't touch the
+   zone's existing MX/SPF/DKIM records, but a second deliberate step keeps
+   the blast radius small regardless.
+
+`aws_amplify_domain_association.cd_webapp` is created with
+`wait_for_verification = false` -- same reason as `amplify/`'s two
+associations (its own outputs are what the Cloudflare records are built
+from, so the DNS it'd wait on doesn't exist yet at creation time).
+Verification happens asynchronously; check the Amplify console or a
+follow-up `terraform plan` rather than trusting `apply`'s exit code for
+that one resource. `aws_cognito_user_pool_domain.cd_webapp`'s
+`cloudflare_record` similarly can't be created until the domain resource
+exists and returns its CloudFront distribution hostname -- confirm the
+exact computed attribute name (`cloudfront_distribution` as written here)
+against the installed `aws` provider version at plan time.
 
 ## Validating without AWS credentials
 
