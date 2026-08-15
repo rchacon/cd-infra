@@ -31,8 +31,13 @@ output "cognito_user_pool_arn" {
 }
 
 output "cognito_user_pool_client_id" {
-  description = "cd-webapp's Cognito App Client ID -- used to build the Managed Login authorize URL (also set directly as this app's own VITE_COGNITO_CLIENT_ID env var)."
-  value       = aws_cognito_user_pool_client.cd_webapp.id
+  description = "cd-webapp-prod's Cognito App Client ID -- used to build the Managed Login authorize URL (also set directly as this app's own VITE_COGNITO_CLIENT_ID env var)."
+  value       = aws_cognito_user_pool_client.cd_webapp_prod.id
+}
+
+output "cognito_dev_client_id" {
+  description = "cd-webapp-dev's Cognito App Client ID -- for local development against http://localhost:5183/callback, sharing the same User Pool as prod."
+  value       = aws_cognito_user_pool_client.cd_webapp_dev.id
 }
 
 output "cognito_domain_url" {

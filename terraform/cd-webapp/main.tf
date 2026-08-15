@@ -1,3 +1,10 @@
+# Safe rename (not a destroy/recreate) for the already-live prod client,
+# split out from a single "cd_webapp" client into prod/dev pair below.
+moved {
+  from = aws_cognito_user_pool_client.cd_webapp
+  to   = aws_cognito_user_pool_client.cd_webapp_prod
+}
+
 # --- Cognito: customer auth for the portal + cd-server's API -------------
 #
 # Email as the sign-in identifier (not a separate username) -- simplest
@@ -44,15 +51,20 @@ resource "aws_cognito_user_pool" "cd_webapp" {
   }
 }
 
-# Public client -- no secret, since this is called directly from the
-# browser (cd-webapp's React app), where a client secret can't be kept
-# confidential anyway. Login goes through Managed Login (below) via the
-# OAuth2 Authorization Code grant -- the app redirects to
-# auth.civicdog.com, never calls InitiateAuth/SRP directly, so only
-# ALLOW_REFRESH_TOKEN_AUTH is needed here (to renew a session silently
-# without a full re-login).
-resource "aws_cognito_user_pool_client" "cd_webapp" {
-  name         = "cd-platform-cd-webapp-web"
+# Two public clients, one per environment, sharing this one User Pool --
+# no secret on either, since both are called directly from a browser
+# (cd-webapp's React app, whether deployed or running locally), where a
+# client secret can't be kept confidential anyway. Login goes through
+# Managed Login (below) via the OAuth2 Authorization Code grant -- the app
+# redirects to auth.civicdog.com, never calls InitiateAuth/SRP directly,
+# so only ALLOW_REFRESH_TOKEN_AUTH is needed on either client (to renew a
+# session silently without a full re-login). Deliberately not a second
+# User Pool -- keeps one shared user directory/password policy/Managed
+# Login config, at the cost of local dev signups landing in the same
+# directory production customers will use; revisit if that pollution
+# becomes a real problem.
+resource "aws_cognito_user_pool_client" "cd_webapp_prod" {
+  name         = "cd-webapp-prod"
   user_pool_id = aws_cognito_user_pool.cd_webapp.id
 
   generate_secret = false
@@ -83,6 +95,40 @@ resource "aws_cognito_user_pool_client" "cd_webapp" {
   # that code exists.
   callback_urls = ["https://app.${var.domain_name}/callback"]
   logout_urls   = ["https://app.${var.domain_name}/"]
+
+  access_token_validity  = 1
+  id_token_validity      = 1
+  refresh_token_validity = 30
+
+  token_validity_units {
+    access_token  = "hours"
+    id_token      = "hours"
+    refresh_token = "days"
+  }
+}
+
+# http://localhost is Cognito's one documented exception to callback_urls
+# otherwise needing HTTPS -- confirm the port here still matches whatever
+# cd-webapp's own `npm run dev` actually binds to (Vite's own default is
+# 5173, not 5183 -- this assumes cd-webapp's dev server config overrides
+# it) if local login stops working after any dev-server config change.
+resource "aws_cognito_user_pool_client" "cd_webapp_dev" {
+  name         = "cd-webapp-dev"
+  user_pool_id = aws_cognito_user_pool.cd_webapp.id
+
+  generate_secret = false
+
+  explicit_auth_flows = [
+    "ALLOW_REFRESH_TOKEN_AUTH",
+  ]
+
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["code"]
+  allowed_oauth_scopes                 = ["openid", "email", "profile"]
+  supported_identity_providers         = ["COGNITO"]
+
+  callback_urls = ["http://localhost:5183/callback"]
+  logout_urls   = ["http://localhost:5183/"]
 
   access_token_validity  = 1
   id_token_validity      = 1
@@ -190,7 +236,7 @@ resource "aws_amplify_app" "cd_webapp" {
   # section for the follow-up apply once ../cd-server/ is provisioned).
   environment_variables = {
     VITE_COGNITO_USER_POOL_ID = aws_cognito_user_pool.cd_webapp.id
-    VITE_COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.cd_webapp.id
+    VITE_COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.cd_webapp_prod.id
     VITE_COGNITO_DOMAIN       = var.cognito_domain_name
     VITE_AWS_REGION           = var.aws_region
   }
