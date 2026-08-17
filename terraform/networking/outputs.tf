@@ -27,3 +27,13 @@ output "lambda_security_group_id" {
   description = "Security group to attach to cd-api's Lambda (#4)."
   value       = aws_security_group.lambda.id
 }
+
+output "alb_security_group_id" {
+  description = "Security group for cd-server's public ALB (../cd-server)."
+  value       = aws_security_group.alb.id
+}
+
+output "cd_server_security_group_id" {
+  description = "Security group for the ECS EC2 instance running cd-server (../cd-server)."
+  value       = aws_security_group.cd_server.id
+}
