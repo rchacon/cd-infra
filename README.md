@@ -12,6 +12,7 @@ flowchart TB
     apigw[["API Gateway<br/>#4"]]
     openapi[("openapi_spec S3<br/>#18, #21")]
     gha[["GitHub Actions<br/>cd-api-deploy.yml"]]
+    alb[["ALB<br/>cd-server"]]
 
     subgraph vpc["VPC -- 10.0.0.0/16 (networking/, #1)"]
         igw["Internet Gateway"]
@@ -24,9 +25,11 @@ flowchart TB
             rds_sg{{"rds SG"}}
             airflow_sg{{"airflow SG"}}
             lambda_sg{{"lambda SG"}}
+            cd_server_sg{{"cd_server SG"}}
             rds[("RDS Postgres<br/>#2")]
             airflow["Airflow EC2<br/>#3"]
             lambda["cd-api Lambda<br/>#4<br/>(+ RDS Proxy)"]
+            cd_server["cd-server ECS (EC2)"]
         end
     end
 
@@ -38,19 +41,29 @@ flowchart TB
     internet -- "GET openapi.json" --> openapi
     gha -- "PutObject openapi.json (OIDC, scoped to that one key)" --> openapi
     apigw -- invokes --> lambda
+    internet -- "server.civicdog.com" --> cf
+    cf -- CNAME --> alb
+    alb --> pub
+    pub -- "dynamic host port" --> cd_server
 
     rds -- protected by --> rds_sg
     airflow -- attaches to --> airflow_sg
     lambda -- attaches to --> lambda_sg
+    cd_server -- attaches to --> cd_server_sg
 
     airflow_sg -- "HTTPS :443" --> nat
     nat --> igw
     airflow_sg -- "Postgres :5432" --> rds_sg
     lambda_sg -- "Postgres :5432" --> rds_sg
+    cd_server_sg -- "HTTPS :443 (GHCR, Census geocoder, AWS APIs)" --> nat
+    cd_server -- "lambda:InvokeFunction (IAM only, no network hop)" --> lambda
 ```
 
-RDS (#2), the Airflow EC2 instance (#3), and cd-api's Lambda + API Gateway
-(#4) are all provisioned -- nothing left planned/dashed. RDS is encrypted
+RDS (#2), the Airflow EC2 instance (#3), cd-api's Lambda + API Gateway
+(#4), and cd-server's ECS (EC2) service + ALB are all provisioned --
+nothing left planned/dashed, aside from Airflow's own planned move onto
+ECS (`cd-infra#24`, a separate cluster from cd-server's, not shown
+above). RDS is encrypted
 under its own customer-managed KMS key, single-AZ, reachable only from the
 `airflow`/`lambda` security groups; its schema comes from `cd-etl`'s
 container migrating itself on every start, run from the Airflow instance
@@ -74,6 +87,20 @@ no boot-time hook to run it from), documented in `terraform/README.md`.
 `bootstrap/`'s S3 state bucket/KMS key/GitHub OIDC provider and every
 component's own KMS key aren't part of this diagram -- they're supporting
 resources, not part of the app's runtime traffic path.
+
+`server.civicdog.com` is a Cloudflare-managed CNAME onto a public ALB
+(`cd-server/`), which forwards to `cd-server`'s ECS service -- **EC2**
+launch type, not Fargate (cheaper for an always-on workload, same stance
+`cd-infra#24` takes for Airflow's planned decomposition), a separate
+cluster/instance from that future Airflow-on-ECS work. Unlike every other
+custom domain in this repo, its ACM certificate is regional (`us-west-2`,
+matching the ALB's own region) rather than requiring `us-east-1` --
+API Gateway's/Amplify's/Cognito's CloudFront-backed custom domains are
+the ones with that constraint, not an ALB. `cd-server` reaches `cd-api`
+by invoking its Lambda **directly via `boto3`** (an IAM
+`lambda:InvokeFunction` grant, shown above), not over HTTP or API
+Gateway -- no network path between the two is needed, so `cd_server_sg`
+has no ingress from `lambda_sg` at all.
 
 `api.civicdog.com` (#19) is a Cloudflare-managed CNAME onto API Gateway's
 custom domain (an ACM cert + `EDGE`/CloudFront endpoint), with `/v1`

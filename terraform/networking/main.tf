@@ -10,8 +10,10 @@ module "vpc" {
   cidr = var.vpc_cidr
 
   azs = var.azs
-  # Private subnets host RDS, the Airflow EC2 instance, and cd-api's Lambda.
-  # Public subnets only host the NAT gateway(s) -- nothing else runs in them.
+  # Private subnets host RDS, the Airflow EC2 instance, cd-api's Lambda,
+  # and (../cd-server) the ECS EC2 instance running cd-server. Public
+  # subnets host the NAT gateway(s) and (../cd-server) the ALB fronting
+  # server.civicdog.com -- the first other thing to live there.
   private_subnets = [for i, az in var.azs : cidrsubnet(var.vpc_cidr, 8, i)]
   public_subnets  = [for i, az in var.azs : cidrsubnet(var.vpc_cidr, 8, i + 100)]
 
@@ -76,6 +78,34 @@ resource "aws_security_group" "airflow" {
 resource "aws_security_group" "lambda" {
   name_prefix = "cd-platform-lambda-"
   description = "cd-api Lambda -- reaches RDS (via RDS Proxy, see #4)"
+  vpc_id      = module.vpc.vpc_id
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+resource "aws_security_group" "alb" {
+  name_prefix = "cd-platform-alb-"
+  description = "cd-server public ALB -- server.civicdog.com"
+  vpc_id      = module.vpc.vpc_id
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+resource "aws_security_group" "cd_server" {
+  name_prefix = "cd-platform-cd-server-"
+  description = "ECS EC2 instance running cd-server -- reachable only from the ALB"
   vpc_id      = module.vpc.vpc_id
 
   lifecycle {
@@ -167,4 +197,64 @@ resource "aws_vpc_security_group_egress_rule" "lambda_to_lambda" {
   to_port                      = local.postgres_port
   ip_protocol                  = "tcp"
   referenced_security_group_id = aws_security_group.lambda.id
+}
+
+# --- ../cd-server: ALB + ECS EC2 instance -----------------------------
+#
+# Same "zero inline rules" split as rds/airflow/lambda above -- alb's
+# egress references cd_server, cd_server's ingress references alb right
+# back.
+
+resource "aws_vpc_security_group_ingress_rule" "alb_https" {
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTPS from the internet -- server.civicdog.com"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "alb_http" {
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTP from the internet, redirected to HTTPS by the listener"
+  from_port         = 80
+  to_port           = 80
+  ip_protocol       = "tcp"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+# Dynamic host port range, not a fixed 8000 -- the ECS task uses dynamic
+# port mapping (hostPort = 0) so more tasks can land on the same instance
+# later without an SG change. Covers Docker's/ECS's default ephemeral
+# range.
+resource "aws_vpc_security_group_egress_rule" "alb_to_cd_server" {
+  security_group_id            = aws_security_group.alb.id
+  description                  = "Dynamic host port range, to the cd-server ECS instance"
+  from_port                    = 32768
+  to_port                      = 65535
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.cd_server.id
+}
+
+resource "aws_vpc_security_group_ingress_rule" "cd_server_from_alb" {
+  security_group_id            = aws_security_group.cd_server.id
+  description                  = "Dynamic host port range, from the ALB"
+  from_port                    = 32768
+  to_port                      = 65535
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.alb.id
+}
+
+# GHCR image pulls, the Census geocoder API, Lambda's regional HTTPS
+# endpoint (cd-server's LambdaApiClient), and SSM -- arbitrary internet
+# destinations with no fixed IP ranges to scope to, same reasoning as
+# airflow_https's egress rule above.
+resource "aws_vpc_security_group_egress_rule" "cd_server_https" {
+  security_group_id = aws_security_group.cd_server.id
+  description       = "HTTPS to GHCR, the Census geocoder, AWS APIs (Lambda invoke, SSM)"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+  #trivy:ignore:AWS-0104
+  cidr_ipv4 = "0.0.0.0/0"
 }

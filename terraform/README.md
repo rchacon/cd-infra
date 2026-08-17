@@ -4,8 +4,9 @@ AWS infrastructure for this repo, provisioned incrementally by component:
 `bootstrap/` (state backend, one-time), `networking/` (#1), `rds/` (#2),
 `airflow/` (#3), `cd-api/` (#4), `amplify/` (Hosting for the `cd-website`
 repo's two apps), `cd-webapp/` (Amplify Hosting + Cognito for the customer
-portal, `rchacon/cd-webapp`). See #5 for the overall AWS deployment
-tracking issue.
+portal, `rchacon/cd-webapp`), `cd-server/` (ECS on EC2 + ALB for
+`rchacon/cd-platform`'s `cd-server`, at `server.civicdog.com`). See #5 for
+the overall AWS deployment tracking issue.
 
 See the root `README.md` for an architecture diagram of the VPC, security
 groups, and planned compute resources.
@@ -578,6 +579,67 @@ that one resource. `aws_cognito_user_pool_domain.cd_webapp`'s
 exists and returns its CloudFront distribution hostname -- confirm the
 exact computed attribute name (`cloudfront_distribution` as written here)
 against the installed `aws` provider version at plan time.
+
+## `cd-server/` -- ECS (EC2) + ALB
+
+`cd-server` (`rchacon/cd-platform`, FastAPI + Strawberry GraphQL backing
+`cd-webapp`) runs as an ECS service on the **EC2 launch type** (not
+Fargate -- cheaper for an always-on workload, same stance `cd-infra#24`
+takes for Airflow's planned ECS decomposition), behind a public ALB at
+`server.civicdog.com`. Provisions: a `t3.micro` ECS container instance
+(launch template + ASG + capacity provider, single instance by default),
+the ECS cluster/service/task definition, the ALB + target group +
+HTTPS/HTTP-redirect listeners, `server.civicdog.com`'s ACM cert (regional,
+`us-west-2` -- unlike `cd-api/`'s/`cd-webapp/`'s CloudFront-backed custom
+domains, an ALB's cert has to be issued in the ALB's own region) and its
+Cloudflare DNS records, and a GitHub OIDC deploy role (see below).
+
+Reads `../networking`'s subnet/security-group outputs and `../cd-api`'s
+`lambda_function_name` output -- `cd-server`'s production `LambdaApiClient`
+invokes `cd-api`'s Lambda directly via `boto3`, not over HTTP, so the only
+cross-component wiring needed is an IAM `lambda:InvokeFunction` grant
+(this directory's task role), not network reachability.
+
+```bash
+cd terraform/cd-server
+cat > backend.hcl <<EOF
+bucket  = "<state_bucket_name from bootstrap output>"
+key     = "cd-server/terraform.tfstate"
+region  = "us-west-2"
+encrypt = true
+EOF
+cat > terraform.tfvars <<EOF
+state_bucket_name        = "<state_bucket_name from bootstrap output>"
+github_oidc_provider_arn = "<github_oidc_provider_arn from bootstrap output>"
+cloudflare_api_token     = "<token from the Cloudflare API Tokens page>"
+cloudflare_zone_id       = "<zone ID from the Cloudflare dashboard>"
+EOF
+
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+```
+
+**No `cd-server` image has been published yet** -- as of this writing, no
+`cd-server-v*` tag has ever been pushed in `cd-platform`, so
+`ghcr.io/rchacon/cd-server` doesn't exist. The ECS service will apply
+cleanly regardless, but its task will sit unable to start until an image
+exists. Push a release (`cd-server-v0.1.0`, matching `cd-server/pyproject.toml`'s
+current version, or whatever's current) either before or after `apply` --
+`cd-server-deploy.yml` builds and pushes it to GHCR on that tag.
+
+**Deploy automation isn't wired up yet.** This directory provisions a
+GitHub OIDC role (`cd_server_deploy`, output as `cd_server_deploy_role_arn`)
+scoped to `ecs:UpdateService`/`ecs:DescribeServices` on this one service,
+but nothing in `cd-platform`'s `cd-server-deploy.yml` assumes it yet --
+unlike Watchtower's GHCR-polling auto-restart on `../airflow`'s plain EC2
+instance, ECS tasks don't self-detect a new `:latest` push. Until that
+workflow step exists, roll out a new image manually:
+
+```bash
+aws ecs update-service --cluster cd-platform-cd-server \
+  --service cd-platform-cd-server --force-new-deployment
+```
 
 ## Validating without AWS credentials
 
