@@ -1,3 +1,16 @@
+# ../cd-server's domain, for VITE_CD_SERVER_URL below -- cd-server (ECS +
+# ALB) is now fully provisioned and live (cd-infra#38), unlike when this
+# module was first written (see that env var's own comment, below, for
+# the stale "doesn't exist yet" reasoning this replaces).
+data "terraform_remote_state" "cd_server" {
+  backend = "s3"
+  config = {
+    bucket = var.state_bucket_name
+    key    = "cd-server/terraform.tfstate"
+    region = var.aws_region
+  }
+}
+
 # Safe rename (not a destroy/recreate) for the already-live prod client,
 # split out from a single "cd_webapp" client into prod/dev pair below.
 moved {
@@ -231,20 +244,27 @@ resource "aws_amplify_app" "cd_webapp" {
   # VITE_-prefixed names are required for Vite to expose these to
   # client-side code (https://vite.dev/guide/env-and-mode) -- anything
   # without that prefix is invisible to the built bundle, not just
-  # unconventional. cd-server's URL isn't set here yet -- that Lambda/API
-  # Gateway doesn't exist yet (see terraform/README.md's cd-webapp/
-  # section for the follow-up apply once ../cd-server/ is provisioned).
+  # unconventional.
   #
-  # Only client_id/domain -- cd-webapp#3's hand-rolled OAuth2 flow talks
-  # directly to Managed Login's HTTP endpoints (/login, /oauth2/token,
-  # /logout) and only needs those two to build its URLs. No region or user
-  # pool ID: those only matter for direct Cognito Identity Provider API
-  # calls (e.g. the AWS SDK or Amplify's Auth module), which this
-  # implementation deliberately avoids -- confirmed unused across every
-  # file in that PR before removing them here.
+  # Only client_id/domain for Cognito -- cd-webapp#3's hand-rolled OAuth2
+  # flow talks directly to Managed Login's HTTP endpoints (/login,
+  # /oauth2/token, /logout) and only needs those two to build its URLs. No
+  # region or user pool ID: those only matter for direct Cognito Identity
+  # Provider API calls (e.g. the AWS SDK or Amplify's Auth module), which
+  # this implementation deliberately avoids -- confirmed unused across
+  # every file in that PR before removing them here.
+  #
+  # VITE_CD_SERVER_URL was missing entirely until cd-infra#39 -- cd-webapp
+  # fell back to its localhost:8000 dev default in production until then
+  # (confirmed live in the deployed bundle). Vite inlines VITE_* vars at
+  # *build* time, not runtime, so setting this alone doesn't retroactively
+  # fix an already-built bundle -- a new Amplify build has to run after
+  # this applies (redeploy the branch, or push a no-op commit) for the new
+  # value to actually land.
   environment_variables = {
     VITE_COGNITO_CLIENT_ID = aws_cognito_user_pool_client.cd_webapp_prod.id
     VITE_COGNITO_DOMAIN    = var.cognito_domain_name
+    VITE_CD_SERVER_URL     = "${data.terraform_remote_state.cd_server.outputs.server_domain_url}/graphql"
   }
 
   build_spec = <<-YAML
