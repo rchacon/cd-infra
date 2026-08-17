@@ -432,11 +432,18 @@ resource "aws_ecs_task_definition" "cd_server" {
 # --- ALB --------------------------------------------------------------
 
 resource "aws_lb" "cd_server" {
-  name               = "cd-platform-cd-server"
+  name = "cd-platform-cd-server"
+  # Public by design -- this is server.civicdog.com's front door, not an
+  # internal asset accidentally exposed.
+  #trivy:ignore:AWS-0053
   internal           = false
   load_balancer_type = "application"
   security_groups    = [data.terraform_remote_state.networking.outputs.alb_security_group_id]
   subnets            = data.terraform_remote_state.networking.outputs.public_subnet_ids
+
+  # Strips non-conforming HTTP headers rather than passing them through to
+  # the target -- guards against header-smuggling-style abuse.
+  drop_invalid_header_fields = true
 
   tags = {
     Project = "cd-platform"
