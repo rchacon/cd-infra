@@ -535,7 +535,11 @@ resource "aws_ecs_task_definition" "triggerer" {
       essential  = true
       entryPoint = ["airflow"]
       command    = ["triggerer"]
-      memory     = 256
+      # No documented measurement this is sized against (unlike
+      # scheduler's parallelism-based figure) -- a conservative starting
+      # point with headroom on t3.medium's budget, tune via CloudWatch
+      # metrics once this is running real workloads.
+      memory = 512
 
       environment = [
         { name = "AIRFLOW__CORE__EXECUTION_API_SERVER_URL", value = local.execution_api_server_url },
@@ -573,7 +577,12 @@ resource "aws_ecs_task_definition" "dag_processor" {
       essential  = true
       entryPoint = ["airflow"]
       command    = ["dag-processor"]
-      memory     = 256
+      # No documented measurement this is sized against. dag-processor
+      # parses and serializes every DAG file on each scan cycle, so it's
+      # more memory-sensitive than a truly idle process -- same
+      # conservative-starting-point reasoning as triggerer's identical
+      # bump, tune via CloudWatch metrics once running real workloads.
+      memory = 512
 
       environment = [
         { name = "AIRFLOW__CORE__EXECUTION_API_SERVER_URL", value = local.execution_api_server_url },
