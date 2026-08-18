@@ -28,6 +28,7 @@ flowchart TB
             cd_server_sg{{"cd_server SG"}}
             rds[("RDS Postgres<br/>#2")]
             airflow["Airflow EC2<br/>#3"]
+            airflow_ecs["Airflow ECS (EC2)<br/>#22, #24<br/>(parallel w/ Airflow EC2)"]
             lambda["cd-api Lambda<br/>#4<br/>(+ RDS Proxy)"]
             cd_server["cd-server ECS (EC2)"]
         end
@@ -48,6 +49,7 @@ flowchart TB
 
     rds -- protected by --> rds_sg
     airflow -- attaches to --> airflow_sg
+    airflow_ecs -- "attaches to (same SG, reused)" --> airflow_sg
     lambda -- attaches to --> lambda_sg
     cd_server -- attaches to --> cd_server_sg
 
@@ -60,10 +62,16 @@ flowchart TB
 ```
 
 RDS (#2), the Airflow EC2 instance (#3), cd-api's Lambda + API Gateway
-(#4), and cd-server's ECS (EC2) service + ALB are all provisioned --
-nothing left planned/dashed, aside from Airflow's own planned move onto
-ECS (`cd-infra#24`, a separate cluster from cd-server's, not shown
-above). RDS is encrypted
+(#4), cd-server's ECS (EC2) service + ALB, and Airflow's own decomposed
+ECS (EC2) cluster (`#22`/`#24`, `airflow-ecs/`) are all provisioned --
+nothing left planned/dashed. `airflow_ecs` runs **alongside** the
+original `airflow` EC2 node above, not in place of it -- both are live
+simultaneously, sharing the same `airflow` security group (reused as-is,
+not a second one) and the same RDS `airflow_metadata` database (safe
+under Airflow's own scheduler-HA row-locking design). The original
+instance is decommissioned only once a full DAG run is confirmed on ECS,
+a deliberate separate follow-up documented in `terraform/README.md`, not
+shown as removed here yet. RDS is encrypted
 under its own customer-managed KMS key, single-AZ, reachable only from the
 `airflow`/`lambda` security groups; its schema comes from `cd-etl`'s
 container migrating itself on every start, run from the Airflow instance
