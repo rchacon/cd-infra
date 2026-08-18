@@ -480,7 +480,14 @@ resource "aws_ecs_task_definition" "scheduler" {
       essential  = true
       entryPoint = ["airflow"]
       command    = ["scheduler"]
-      memory     = 512
+      # var.airflow_parallelism (4) LocalExecutor worker subprocesses at
+      # ~130MB RSS each (../airflow/variables.tf's own measured figure)
+      # is already ~520MB before counting the scheduler daemon's own
+      # baseline (Python interpreter, DAG parsing/caching, Airflow core)
+      # -- 512MB would OOM-kill this container under real load. Plenty of
+      # headroom on t3.medium (4GiB) to size generously; tune down later
+      # if real CloudWatch metrics show room to.
+      memory = 1024
 
       # Only the scheduler needs CONGRESS_API_KEY/
       # AIRFLOW_CONN_CONGRESSIONAL_POSTGRES -- under LocalExecutor, DAG
