@@ -702,12 +702,26 @@ resource "aws_ecs_task_definition" "migrate" {
 # 4 separate services, not 1 service running 4 containers -- bundling
 # would couple all 4 components' restart/replacement together and defeat
 # the entire point of this decomposition (#22/#24).
+#
+# All 4 set deployment_minimum_healthy_percent = 0 /
+# deployment_maximum_percent = 100 -- ECS's own defaults (100/200) try to
+# run the new task *alongside* the old one during a rolling deployment,
+# which this single-instance ASG (min_size = max_size = 1) can't
+# accommodate: api-server's fixed hostPort 8080 can't be bound twice on
+# one host, and even the 3 host-portless services would need double their
+# steady-state memory momentarily available on the same one instance.
+# Either way, the new task gets stuck unable to start and the deployment
+# never completes. 0/100 replaces that with a plain stop-then-start (a
+# brief gap during deploys, acceptable for a batch/scheduled system with
+# no live request traffic to preserve zero-downtime for).
 
 resource "aws_ecs_service" "scheduler" {
-  name            = "cd-platform-airflow-scheduler"
-  cluster         = aws_ecs_cluster.airflow.id
-  task_definition = aws_ecs_task_definition.scheduler.arn
-  desired_count   = 1
+  name                               = "cd-platform-airflow-scheduler"
+  cluster                            = aws_ecs_cluster.airflow.id
+  task_definition                    = aws_ecs_task_definition.scheduler.arn
+  desired_count                      = 1
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.airflow.name
@@ -729,10 +743,12 @@ resource "aws_ecs_service" "scheduler" {
 }
 
 resource "aws_ecs_service" "triggerer" {
-  name            = "cd-platform-airflow-triggerer"
-  cluster         = aws_ecs_cluster.airflow.id
-  task_definition = aws_ecs_task_definition.triggerer.arn
-  desired_count   = 1
+  name                               = "cd-platform-airflow-triggerer"
+  cluster                            = aws_ecs_cluster.airflow.id
+  task_definition                    = aws_ecs_task_definition.triggerer.arn
+  desired_count                      = 1
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.airflow.name
@@ -751,10 +767,12 @@ resource "aws_ecs_service" "triggerer" {
 }
 
 resource "aws_ecs_service" "dag_processor" {
-  name            = "cd-platform-airflow-dag-processor"
-  cluster         = aws_ecs_cluster.airflow.id
-  task_definition = aws_ecs_task_definition.dag_processor.arn
-  desired_count   = 1
+  name                               = "cd-platform-airflow-dag-processor"
+  cluster                            = aws_ecs_cluster.airflow.id
+  task_definition                    = aws_ecs_task_definition.dag_processor.arn
+  desired_count                      = 1
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.airflow.name
@@ -773,10 +791,12 @@ resource "aws_ecs_service" "dag_processor" {
 }
 
 resource "aws_ecs_service" "api_server" {
-  name            = "cd-platform-airflow-api-server"
-  cluster         = aws_ecs_cluster.airflow.id
-  task_definition = aws_ecs_task_definition.api_server.arn
-  desired_count   = 1
+  name                               = "cd-platform-airflow-api-server"
+  cluster                            = aws_ecs_cluster.airflow.id
+  task_definition                    = aws_ecs_task_definition.api_server.arn
+  desired_count                      = 1
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.airflow.name
