@@ -103,6 +103,38 @@ resource "aws_secretsmanager_secret_version" "airflow_metadata_sql_alchemy_conn"
   secret_string = local.airflow_metadata_sql_alchemy_conn
 }
 
+# Durable FabAuthManager admin credential (cd-platform#74/#31,
+# cd-platform#75) -- replaces SimpleAuthManager's auto-generated,
+# plaintext-logged password that didn't survive container/task
+# replacement. Provisioned once via the migrate task's `create-admin-user`
+# invocation below (cd-etl/entrypoint.sh's dedicated hook, built
+# specifically for this) -- idempotent (`users create` no-ops if the
+# account exists, followed by an unconditional `users reset-password`),
+# so re-running it after a password rotation here (a new secret version)
+# actually takes effect, unlike a one-time `users create` alone would.
+resource "random_password" "airflow_admin" {
+  length = 32
+  # No special characters -- passed as a literal CLI argument
+  # (`--password "$AIRFLOW_ADMIN_PASSWORD"`) by entrypoint.sh's
+  # create_admin_user(), same "sidestep shell-quoting entirely" reasoning
+  # as ../airflow/main.tf's cd_etl_app password.
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "airflow_admin_password" {
+  name       = "cd-platform/airflow-ecs/airflow-admin-password"
+  kms_key_id = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "airflow_admin_password" {
+  secret_id     = aws_secretsmanager_secret.airflow_admin_password.id
+  secret_string = random_password.airflow_admin.result
+}
+
 # --- ECS cluster + Service Connect ------------------------------------
 #
 # HTTP namespace (not a private DNS namespace) -- Service Connect's own
@@ -375,8 +407,9 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
 
 # The task execution role (not the task role) is what resolves each
 # container definition's `secrets` block at task launch -- needs read
-# access to all 4 secrets referenced below (2 reused from ../airflow, 2
-# new derived ones) plus decrypt on the KMS key protecting all of them.
+# access to all 5 secrets referenced below (2 reused from ../airflow, 3
+# new ones provisioned in this module) plus decrypt on the KMS key
+# protecting all of them.
 data "aws_iam_policy_document" "task_execution_secrets" {
   statement {
     sid     = "ReadAirflowSecrets"
@@ -386,6 +419,7 @@ data "aws_iam_policy_document" "task_execution_secrets" {
       data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn,
       aws_secretsmanager_secret.airflow_conn_congressional_postgres.arn,
       aws_secretsmanager_secret.airflow_metadata_sql_alchemy_conn.arn,
+      aws_secretsmanager_secret.airflow_admin_password.arn,
     ]
   }
 
@@ -655,12 +689,19 @@ resource "aws_ecs_task_definition" "api_server" {
   }
 }
 
-# One-shot migration task -- deliberately NOT registered as a service.
-# Keeps the image's default ENTRYPOINT (no entryPoint override), so
-# entrypoint.sh's unconditional `airflow db migrate` + `alembic upgrade
-# head` actually run; `command = ["true"]` makes it a no-op *after* that
-# instead of falling through to `airflow standalone` (entrypoint.sh's own
-# `if [ "$#" -eq 0 ]` branch). Invoked ad hoc via `aws ecs run-task` (see
+# One-shot migration + admin-provisioning task -- deliberately NOT
+# registered as a service. Keeps the image's default ENTRYPOINT (no
+# entryPoint override), so entrypoint.sh's unconditional `airflow db
+# migrate` + `alembic upgrade head` actually run; `command =
+# ["create-admin-user"]` hits entrypoint.sh's dedicated
+# `create-admin-user` subcommand (cd-platform#75) after that, which
+# idempotently provisions/resets the FabAuthManager admin account (see
+# cd-platform#74/#31 -- replaces SimpleAuthManager's auto-generated,
+# plaintext-logged password) instead of falling through to `airflow
+# standalone` (entrypoint.sh's `if [ "$#" -eq 0 ]` branch, which the 4
+# long-running services also never reach -- their entryPoint override
+# skips entrypoint.sh entirely, so only this task ever provisions the
+# admin account). Invoked ad hoc via `aws ecs run-task` (see
 # terraform/README.md) -- wiring this into cd-etl's deploy pipeline is a
 # follow-up cd-platform issue, not built here.
 resource "aws_ecs_task_definition" "migrate" {
@@ -675,7 +716,7 @@ resource "aws_ecs_task_definition" "migrate" {
       name      = "migrate"
       image     = local.cd_etl_image
       essential = true
-      command   = ["true"]
+      command   = ["create-admin-user"]
       memory    = 256
 
       # PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE are for cd-etl's own
@@ -695,6 +736,7 @@ resource "aws_ecs_task_definition" "migrate" {
         local.airflow_metadata_conn_secret,
         { name = "PGUSER", valueFrom = "${data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn}:username::" },
         { name = "PGPASSWORD", valueFrom = "${data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn}:password::" },
+        { name = "AIRFLOW_ADMIN_PASSWORD", valueFrom = aws_secretsmanager_secret.airflow_admin_password.arn },
       ]
 
       logConfiguration = {

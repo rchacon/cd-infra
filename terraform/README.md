@@ -210,9 +210,21 @@ long-running task definitions override `entryPoint` to `["airflow"]`,
 bypassing `/entrypoint.sh` (and its migration block) entirely --
 `airflow` is already on the image's own `PATH`. A 5th task definition
 (`migrate`, not registered as a service) keeps the image's *default*
-entrypoint with a `command = ["true"]` override, so migrations still run
-(unconditionally, as designed) and then it exits 0 instead of falling
-through to `airflow standalone`.
+entrypoint with a `command = ["create-admin-user"]` override, so
+migrations still run (unconditionally, as designed) and then it hits
+`entrypoint.sh`'s dedicated `create-admin-user` subcommand
+(`cd-platform#75`) instead of falling through to `airflow standalone`.
+
+**That same `create-admin-user` invocation also provisions cd-etl's
+Airflow admin account** (`cd-platform#74`/`#31` -- switched from
+`SimpleAuthManager`'s auto-generated, plaintext-logged password to
+`FabAuthManager`). The admin password is a Terraform-generated,
+Secrets-Manager-held secret (`aws_secretsmanager_secret.airflow_admin_password`),
+injected only into the `migrate` task -- the 4 long-running services
+never provision the account themselves, only this one-shot task does,
+idempotently (`users create` no-ops if the account exists, followed by
+an unconditional `users reset-password`, so re-running this after
+rotating the secret actually takes effect).
 
 ```bash
 cd terraform/airflow-ecs
@@ -254,6 +266,28 @@ RunCommand + `docker exec` flow `airflow/` needs today:
 ```bash
 aws ecs execute-command --cluster "$(terraform output -raw ecs_cluster_name)" \
   --task <task-arn> --container scheduler --interactive --command "/bin/sh"
+```
+
+**Logging into the UI** -- same SSM port-forward pattern as `airflow/`'s
+own instance (`api-server` publishes a fixed host port 8080 for exactly
+this), just against this module's container instance rather than
+`airflow/`'s:
+
+```bash
+INSTANCE_ID=$(aws ecs list-container-instances --cluster "$(terraform output -raw ecs_cluster_name)" --query 'containerInstanceArns[0]' --output text | xargs -I{} aws ecs describe-container-instances --cluster "$(terraform output -raw ecs_cluster_name)" --container-instances {} --query 'containerInstances[0].ec2InstanceId' --output text)
+aws ssm start-session --target "$INSTANCE_ID" \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+```
+
+Log in as `admin`, password from the Terraform-generated secret (never
+printed by `terraform apply`/`plan` -- pull it explicitly, and only in a
+private terminal):
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id "$(aws secretsmanager list-secrets --query "SecretList[?Name=='cd-platform/airflow-ecs/airflow-admin-password'].ARN" --output text)" \
+  --query SecretString --output text
 ```
 
 **One area of real uncertainty**: `AIRFLOW__CORE__EXECUTION_API_SERVER_URL`
