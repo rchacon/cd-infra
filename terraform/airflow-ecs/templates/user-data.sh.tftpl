@@ -4,8 +4,20 @@ set -euo pipefail
 # Unlike ../airflow's plain AL2023 AMI, this instance boots the
 # ECS-optimized AL2023 AMI -- Docker and the ECS agent are both
 # preinstalled, so there's nothing to install here at all. This only has
-# two jobs: (1) the same idempotent RDS bootstrap ../airflow's user-data
-# does, and (2) tell the ECS agent which cluster to join.
+# two jobs: (1) tell the ECS agent which cluster to join, and (2) the
+# same idempotent RDS bootstrap ../airflow's user-data does.
+
+# Deliberately first and unconditional, before anything that touches the
+# network/RDS -- under `set -euo pipefail`, a transient failure in the
+# bootstrap below (RDS not yet reachable, SG propagation delay, a
+# get-secret-value hiccup) would abort the script before a later
+# ECS_CLUSTER write ever ran, leaving the instance looking healthy in the
+# ASG while the ECS agent never registers with the cluster and no task
+# ever gets placed on it -- with no obvious error outside cloud-init logs.
+# Writing this first means that failure mode is now independent: even if
+# the RDS bootstrap below fails, the instance still joins the cluster.
+echo "ECS_CLUSTER=${ecs_cluster_name}" >> /etc/ecs/ecs.config
+
 dnf install -y jq postgresql16
 
 REGION="${aws_region}"
@@ -46,7 +58,3 @@ GRANT ALL ON SCHEMA public TO "${cd_etl_db_username}";
 SQL
 done
 unset PGPASSWORD
-
-# Registers this instance with the target ECS cluster -- the
-# ECS-optimized AMI's agent picks this up on its next start.
-echo "ECS_CLUSTER=${ecs_cluster_name}" >> /etc/ecs/ecs.config
