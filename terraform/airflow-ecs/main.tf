@@ -795,6 +795,16 @@ resource "aws_ecs_service" "scheduler" {
 
   enable_execute_command = true
 
+  # Terraform's implicit dependency graph only follows the
+  # capacity_provider_strategy reference above to the capacity provider
+  # object itself, not to the separate resource that actually associates
+  # it with the cluster (PutClusterCapacityProviders) -- without this
+  # explicit depends_on (same on all 4 services below), a fresh apply can
+  # race the service create ahead of that association and fail with
+  # "InvalidParameterException: The specified capacity provider ... is
+  # not associated with the cluster".
+  depends_on = [aws_ecs_cluster_capacity_providers.airflow]
+
   tags = {
     Project = "cd-platform"
   }
@@ -818,6 +828,7 @@ resource "aws_ecs_service" "triggerer" {
   }
 
   enable_execute_command = true
+  depends_on             = [aws_ecs_cluster_capacity_providers.airflow]
 
   tags = {
     Project = "cd-platform"
@@ -842,6 +853,7 @@ resource "aws_ecs_service" "dag_processor" {
   }
 
   enable_execute_command = true
+  depends_on             = [aws_ecs_cluster_capacity_providers.airflow]
 
   tags = {
     Project = "cd-platform"
@@ -879,6 +891,7 @@ resource "aws_ecs_service" "api_server" {
   }
 
   enable_execute_command = true
+  depends_on             = [aws_ecs_cluster_capacity_providers.airflow]
 
   tags = {
     Project = "cd-platform"
