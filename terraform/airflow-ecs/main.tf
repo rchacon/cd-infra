@@ -75,9 +75,19 @@ locals {
 # env-var-assembly script (this module has no equivalent script at all --
 # see templates/user-data.sh.tftpl, which only does the RDS bootstrap and
 # ECS cluster registration).
+# recovery_window_in_days = 0 on all 3 secrets in this module (below too)
+# -- confirmed the hard way that AWS's default 30-day soft-delete window
+# blocks recreating a same-named secret in one apply
+# (InvalidRequestException: "already scheduled for deletion"), a real
+# problem for a module still under active iteration. None of these hold
+# hand-entered, irreplaceable data -- all 3 are either derived connection
+# strings or a freshly Terraform-generated password, trivially
+# regenerable from their real sources (RDS, random_password) -- so the
+# 30-day recovery safety net isn't worth the recreate friction here.
 resource "aws_secretsmanager_secret" "airflow_conn_congressional_postgres" {
-  name       = "cd-platform/airflow-ecs/airflow-conn-congressional-postgres"
-  kms_key_id = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  name                    = "cd-platform/airflow-ecs/airflow-conn-congressional-postgres"
+  kms_key_id              = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  recovery_window_in_days = 0
 
   tags = {
     Project = "cd-platform"
@@ -90,8 +100,9 @@ resource "aws_secretsmanager_secret_version" "airflow_conn_congressional_postgre
 }
 
 resource "aws_secretsmanager_secret" "airflow_metadata_sql_alchemy_conn" {
-  name       = "cd-platform/airflow-ecs/airflow-metadata-sql-alchemy-conn"
-  kms_key_id = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  name                    = "cd-platform/airflow-ecs/airflow-metadata-sql-alchemy-conn"
+  kms_key_id              = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  recovery_window_in_days = 0
 
   tags = {
     Project = "cd-platform"
@@ -122,8 +133,9 @@ resource "random_password" "airflow_admin" {
 }
 
 resource "aws_secretsmanager_secret" "airflow_admin_password" {
-  name       = "cd-platform/airflow-ecs/airflow-admin-password"
-  kms_key_id = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  name                    = "cd-platform/airflow-ecs/airflow-admin-password"
+  kms_key_id              = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  recovery_window_in_days = 0
 
   tags = {
     Project = "cd-platform"
