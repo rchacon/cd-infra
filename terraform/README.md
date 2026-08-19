@@ -5,8 +5,11 @@ AWS infrastructure for this repo, provisioned incrementally by component:
 `airflow/` (#3), `cd-api/` (#4), `amplify/` (Hosting for the `cd-website`
 repo's two apps), `cd-webapp/` (Amplify Hosting + Cognito for the customer
 portal, `rchacon/cd-webapp`), `cd-server/` (ECS on EC2 + ALB for
-`rchacon/cd-platform`'s `cd-server`, at `server.civicdog.com`). See #5 for
-the overall AWS deployment tracking issue.
+`rchacon/cd-platform`'s `cd-server`, at `server.civicdog.com`),
+`airflow-ecs/` (Airflow decomposed onto 4 ECS services, #22/#24 --
+runs alongside `airflow/` until validated, see that directory's own
+section for the cutover plan). See #5 for the overall AWS deployment
+tracking issue.
 
 See the root `README.md` for an architecture diagram of the VPC, security
 groups, and planned compute resources.
@@ -176,6 +179,134 @@ aws ssm start-session --target "$(terraform output -raw instance_id)" \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
 ```
+
+## `airflow-ecs/` -- Airflow decomposed onto ECS (EC2)
+
+Decomposes `airflow/`'s single `airflow standalone` container into 4
+independent ECS services (`scheduler`, `triggerer`, `dag-processor`,
+`api-server`), each its own task definition, on a dedicated ECS cluster
+(EC2 launch type, `t3.medium`) -- see `cd-infra#22`/`#24` for the incident
+and reasoning (a subprocess dying silently inside `airflow standalone`
+left the container looking "healthy" while the pipeline missed 5 days of
+runs; ECS's per-service health-check-driven task replacement, not
+process-exit-driven `restart:` policies, is what actually catches that
+class of bug).
+
+**Runs in parallel with `airflow/`, not as a replacement for it, until
+validated.** This directory doesn't touch `airflow/`'s EC2 instance at
+all -- both can safely run concurrently against the same RDS
+`airflow_metadata` database (Airflow's scheduler HA design exists
+precisely to let multiple scheduler processes coexist without duplicate
+task execution). Decommissioning `airflow/`'s instance is a deliberate,
+separate follow-up once a real DAG run is confirmed on ECS -- not part of
+applying this directory.
+
+**No `cd-platform` change was needed for the migration-race problem
+`#24` originally flagged.** `cd-etl/entrypoint.sh` runs `airflow db
+migrate` and `alembic upgrade head` unconditionally, before even looking
+at its arguments -- so 4 independent services naively sharing the image
+would race migrations against RDS on every task start. Instead, the 4
+long-running task definitions override `entryPoint` to `["airflow"]`,
+bypassing `/entrypoint.sh` (and its migration block) entirely --
+`airflow` is already on the image's own `PATH`. A 5th task definition
+(`migrate`, not registered as a service) keeps the image's *default*
+entrypoint with a `command = ["create-admin-user"]` override, so
+migrations still run (unconditionally, as designed) and then it hits
+`entrypoint.sh`'s dedicated `create-admin-user` subcommand
+(`cd-platform#75`) instead of falling through to `airflow standalone`.
+
+**That same `create-admin-user` invocation also provisions cd-etl's
+Airflow admin account** (`cd-platform#74`/`#31` -- switched from
+`SimpleAuthManager`'s auto-generated, plaintext-logged password to
+`FabAuthManager`). The admin password is a Terraform-generated,
+Secrets-Manager-held secret (`aws_secretsmanager_secret.airflow_admin_password`),
+injected only into the `migrate` task -- the 4 long-running services
+never provision the account themselves, only this one-shot task does,
+idempotently (`users create` no-ops if the account exists, followed by
+an unconditional `users reset-password`, so re-running this after
+rotating the secret actually takes effect).
+
+```bash
+cd terraform/airflow-ecs
+cat > backend.hcl <<EOF
+bucket  = "<state_bucket_name from bootstrap output>"
+key     = "airflow-ecs/terraform.tfstate"
+region  = "us-west-2"
+encrypt = true
+EOF
+cat > terraform.tfvars <<EOF
+state_bucket_name = "<state_bucket_name from bootstrap output>"
+EOF
+
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+```
+
+**Running the one-shot migration task** -- do this once right after the
+first `apply` (the RDS schema is already current from `airflow/`'s own
+instance, but this is still worth confirming end-to-end), and again after
+any future `cd-etl` release:
+
+```bash
+aws ecs run-task \
+  --cluster "$(terraform output -raw ecs_cluster_name)" \
+  --task-definition "$(terraform output -raw migrate_task_definition_arn)" \
+  --launch-type EC2
+
+# Poll until it exits, then confirm exit code 0:
+aws ecs describe-tasks --cluster "$(terraform output -raw ecs_cluster_name)" \
+  --tasks <task-arn-from-run-task-output> \
+  --query 'tasks[0].containers[0].exitCode'
+```
+
+**Debugging a service** -- `aws ecs execute-command` replaces the SSM
+RunCommand + `docker exec` flow `airflow/` needs today:
+
+```bash
+aws ecs execute-command --cluster "$(terraform output -raw ecs_cluster_name)" \
+  --task <task-arn> --container scheduler --interactive --command "/bin/sh"
+```
+
+**Logging into the UI** -- same SSM port-forward pattern as `airflow/`'s
+own instance (`api-server` publishes a fixed host port 8080 for exactly
+this), just against this module's container instance rather than
+`airflow/`'s:
+
+```bash
+INSTANCE_ID=$(aws ecs list-container-instances --cluster "$(terraform output -raw ecs_cluster_name)" --query 'containerInstanceArns[0]' --output text | xargs -I{} aws ecs describe-container-instances --cluster "$(terraform output -raw ecs_cluster_name)" --container-instances {} --query 'containerInstances[0].ec2InstanceId' --output text)
+aws ssm start-session --target "$INSTANCE_ID" \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+```
+
+Log in as `admin`, password from the Terraform-generated secret (never
+printed by `terraform apply`/`plan` -- pull it explicitly, and only in a
+private terminal):
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id "$(aws secretsmanager list-secrets --query "SecretList[?Name=='cd-platform/airflow-ecs/airflow-admin-password'].ARN" --output text)" \
+  --query SecretString --output text
+```
+
+**One area of real uncertainty**: `AIRFLOW__CORE__EXECUTION_API_SERVER_URL`
+(Airflow 3.x's Task Execution API -- how `scheduler`/`triggerer`/
+`dag-processor` reach `api-server`) is set to
+`http://api-server.airflow:8080/execution/` based on reading Airflow's
+docs, not a confirmed-working value yet. If the scheduler/triggerer can't
+reach `api-server`, check their CloudWatch Logs
+(`/ecs/cd-platform-airflow`, streams prefixed `scheduler`/`triggerer`)
+for the actual error and adjust the URL/config key in `main.tf`'s
+`local.execution_api_server_url` accordingly -- same "real errors over
+guessing" approach that resolved `cd-server`'s IAM gaps.
+
+**Deploy automation isn't wired up yet** -- same gap as `cd-server`
+(`cd-platform#71`): `cd-etl-deploy.yml` only builds and pushes to GHCR
+today. A future `cd-platform` issue should add the migration `run-task`
++ `aws ecs update-service --force-new-deployment` (x3, for scheduler/
+triggerer/dag-processor -- api-server too if its image ever changes)
+steps on `cd-etl-v*` tag push.
 
 ## `cd-api/` -- Lambda + API Gateway
 

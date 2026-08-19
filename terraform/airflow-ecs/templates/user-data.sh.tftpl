@@ -1,0 +1,60 @@
+#!/bin/bash
+set -euo pipefail
+
+# Unlike ../airflow's plain AL2023 AMI, this instance boots the
+# ECS-optimized AL2023 AMI -- Docker and the ECS agent are both
+# preinstalled, so there's nothing to install here at all. This only has
+# two jobs: (1) tell the ECS agent which cluster to join, and (2) the
+# same idempotent RDS bootstrap ../airflow's user-data does.
+
+# Deliberately first and unconditional, before anything that touches the
+# network/RDS -- under `set -euo pipefail`, a transient failure in the
+# bootstrap below (RDS not yet reachable, SG propagation delay, a
+# get-secret-value hiccup) would abort the script before a later
+# ECS_CLUSTER write ever ran, leaving the instance looking healthy in the
+# ASG while the ECS agent never registers with the cluster and no task
+# ever gets placed on it -- with no obvious error outside cloud-init logs.
+# Writing this first means that failure mode is now independent: even if
+# the RDS bootstrap below fails, the instance still joins the cluster.
+echo "ECS_CLUSTER=${ecs_cluster_name}" >> /etc/ecs/ecs.config
+
+dnf install -y jq postgresql16
+
+REGION="${aws_region}"
+
+# No static credentials anywhere -- fetched via this instance's own IAM
+# role (see main.tf's aws_iam_role_policy.ecs_instance).
+RDS_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
+  --secret-id "${rds_master_secret_arn}" --query SecretString --output text)
+RDS_USER=$(echo "$RDS_SECRET" | jq -r .username)
+RDS_PASS=$(echo "$RDS_SECRET" | jq -r .password)
+
+CD_ETL_APP_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
+  --secret-id "${cd_etl_app_db_secret_arn}" --query SecretString --output text)
+CD_ETL_APP_PASS=$(echo "$CD_ETL_APP_SECRET" | jq -r .password)
+
+# Same idempotent bootstrap as ../airflow/templates/user-data.sh.tftpl --
+# creates the airflow_metadata database (RDS has no
+# docker-entrypoint-initdb.d equivalent) and the cd_etl_app role, safe to
+# re-run on every boot. Targets the exact same database/role as
+# ../airflow's instance (var.cd_etl_db_username/airflow_metadata_db_name
+# must match, see variables.tf), so both this instance and ../airflow's
+# can run concurrently during the validation window without diverging.
+export PGPASSWORD="$RDS_PASS"
+psql -h ${rds_address} -U "$RDS_USER" -d postgres -v ON_ERROR_STOP=1 <<-SQL
+SELECT 'CREATE DATABASE ${airflow_metadata_db_name}'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${airflow_metadata_db_name}')\gexec
+
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', '${cd_etl_db_username}', '$CD_ETL_APP_PASS')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${cd_etl_db_username}')\gexec
+
+ALTER ROLE "${cd_etl_db_username}" WITH PASSWORD '$CD_ETL_APP_PASS';
+SQL
+
+for db in cd_platform ${airflow_metadata_db_name}; do
+  psql -h ${rds_address} -U "$RDS_USER" -d "$db" -v ON_ERROR_STOP=1 <<-SQL
+GRANT ALL PRIVILEGES ON DATABASE "$db" TO "${cd_etl_db_username}";
+GRANT ALL ON SCHEMA public TO "${cd_etl_db_username}";
+SQL
+done
+unset PGPASSWORD
