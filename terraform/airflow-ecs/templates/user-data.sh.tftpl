@@ -58,3 +58,29 @@ GRANT ALL ON SCHEMA public TO "${cd_etl_db_username}";
 SQL
 done
 unset PGPASSWORD
+
+# Host-level memory metrics -- Container Insights (see main.tf's
+# aws_ecs_cluster) only reports per-*container* memory against each
+# task's own cgroup limit, not the underlying host's overall usage. With
+# all 4 services' containers on this single instance, their limits alone
+# (1GiB scheduler + 512MiB x3) already add up to most of the t3.medium's
+# 4GiB, leaving little visibility into whether the host itself (Docker
+# daemon, ECS agent, kernel) is under pressure independent of any one
+# container's own ceiling. EC2 doesn't report memory to CloudWatch at all
+# without this agent -- CPU/network/disk are the only free/built-in ones.
+dnf install -y amazon-cloudwatch-agent
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<-'EOF'
+{
+  "metrics": {
+    "metrics_collected": {
+      "mem": {
+        "measurement": ["mem_used_percent"],
+        "metrics_collection_interval": 60
+      }
+    }
+  }
+}
+EOF
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json

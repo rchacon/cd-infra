@@ -310,6 +310,17 @@ resource "aws_iam_role_policy_attachment" "ecs_instance_ecs" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
 }
 
+# Lets the CloudWatch Agent (templates/user-data.sh.tftpl) publish
+# host-level memory metrics -- cloudwatch:PutMetricData plus the SSM
+# actions its own default config workflow uses (ssm:GetParameter for the
+# agent's own config, even though this instance writes its config to a
+# local file rather than Parameter Store -- harmless if unused, standard
+# AWS-managed policy for exactly this agent).
+resource "aws_iam_role_policy_attachment" "ecs_instance_cloudwatch_agent" {
+  role       = aws_iam_role.ecs_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
 resource "aws_iam_instance_profile" "ecs_instance" {
   name = "cd-platform-airflow-ecs-instance"
   role = aws_iam_role.ecs_instance.name
