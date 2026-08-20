@@ -987,3 +987,99 @@ resource "aws_ecs_service" "api_server" {
     Project = "cd-platform"
   }
 }
+
+# Single-pane-of-glass view combining the two metric sources that only
+# exist as separate CloudWatch UIs otherwise (Container Insights'
+# built-in dashboard vs. the CloudWatch Agent's host-level metric, see
+# templates/user-data.sh.tftpl). Every widget uses a SEARCH() expression
+# rather than a hardcoded dimension -- the instance is ASG-managed (no
+# stable InstanceId across replacement) and services could be
+# added/removed later, so hardcoding either would silently go stale.
+resource "aws_cloudwatch_dashboard" "airflow" {
+  dashboard_name = "cd-platform-airflow"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 24
+        height = 6
+        properties = {
+          title   = "Host memory used (%)"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stacked = false
+          metrics = [
+            [{
+              expression = "SEARCH('{CWAgent,InstanceId} MetricName=\"mem_used_percent\"', 'Average', 300)"
+              id         = "hostMem"
+            }]
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Per-service memory utilized (Container Insights)"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stacked = false
+          metrics = [
+            [{
+              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"MemoryUtilized\"', 'Average', 300)"
+              id         = "svcMem"
+            }]
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Per-service CPU utilized (Container Insights)"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stacked = false
+          metrics = [
+            [{
+              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"CpuUtilized\"', 'Average', 300)"
+              id         = "svcCpu"
+            }]
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 12
+        width  = 24
+        height = 6
+        properties = {
+          title   = "Running vs. desired tasks per service (Container Insights)"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stacked = false
+          metrics = [
+            [{
+              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"RunningTaskCount\"', 'Average', 300)"
+              id         = "svcRunning"
+            }],
+            [{
+              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"DesiredTaskCount\"', 'Average', 300)"
+              id         = "svcDesired"
+            }]
+          ]
+        }
+      }
+    ]
+  })
+}
