@@ -201,6 +201,21 @@ resource "aws_service_discovery_http_namespace" "airflow" {
 resource "aws_ecs_cluster" "airflow" {
   name = "cd-platform-airflow"
 
+  # Publishes per-task/per-service CPU and memory utilization to
+  # CloudWatch (ECS/ContainerInsights namespace) plus a built-in
+  # CloudWatch dashboard with historical graphs -- was off by default,
+  # confirmed the hard way that debugging a real OOM (#59's
+  # fetch_member_votes) meant manually polling `docker stats` over SSM
+  # every ~20s for several minutes instead of glancing at a graph.
+  # "enabled" (the standard tier), not "enhanced" -- matches this
+  # project's cost-conscious default posture; enhanced's extra
+  # container/process-level detail isn't needed for a single-instance
+  # cluster this size.
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
   service_connect_defaults {
     namespace = aws_service_discovery_http_namespace.airflow.arn
   }
