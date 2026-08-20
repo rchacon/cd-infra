@@ -286,7 +286,7 @@ private terminal):
 
 ```bash
 aws secretsmanager get-secret-value \
-  --secret-id "$(aws secretsmanager list-secrets --query "SecretList[?Name=='cd-platform/airflow-ecs/airflow-admin-password'].ARN" --output text)" \
+  --secret-id "cd-platform/airflow-ecs/airflow-admin-password" \
   --query SecretString --output text
 ```
 

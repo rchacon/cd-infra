@@ -147,6 +147,40 @@ resource "aws_secretsmanager_secret_version" "airflow_admin_password" {
   secret_string = random_password.airflow_admin.result
 }
 
+# Shared secret for Airflow 3.x's Task Execution API auth (AIRFLOW__API_AUTH__JWT_SECRET,
+# confirmed via `airflow config list` against a real running task -- lives
+# under [api_auth], not [core]). Confirmed the hard way: with this unset,
+# each of the 4 ECS containers independently generates its own random
+# secret at startup, so a JWT the scheduler signs to call api-server's
+# execution API can never validate there -- every task the scheduler
+# tried to run failed immediately with
+# `airflow.sdk.api.client.ServerResponseError: Invalid auth token`, with
+# the task itself marked up_for_retry indefinitely and no error at all in
+# the scheduler's own top-level logs (the failure surfaces from the
+# LocalExecutor's subprocess, a separate log context). All 4 long-running
+# services need the identical value -- scheduler/triggerer sign tokens as
+# clients, api-server validates them, dag-processor participates in the
+# same auth scheme for its own execution API calls.
+resource "random_password" "airflow_jwt_secret" {
+  length  = 64
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "airflow_jwt_secret" {
+  name                    = "cd-platform/airflow-ecs/airflow-jwt-secret"
+  kms_key_id              = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  recovery_window_in_days = 0
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "airflow_jwt_secret" {
+  secret_id     = aws_secretsmanager_secret.airflow_jwt_secret.id
+  secret_string = random_password.airflow_jwt_secret.result
+}
+
 # --- ECS cluster + Service Connect ------------------------------------
 #
 # HTTP namespace (not a private DNS namespace) -- Service Connect's own
@@ -419,7 +453,7 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
 
 # The task execution role (not the task role) is what resolves each
 # container definition's `secrets` block at task launch -- needs read
-# access to all 5 secrets referenced below (2 reused from ../airflow, 3
+# access to all 6 secrets referenced below (2 reused from ../airflow, 4
 # new ones provisioned in this module) plus decrypt on the KMS key
 # protecting all of them.
 data "aws_iam_policy_document" "task_execution_secrets" {
@@ -432,6 +466,7 @@ data "aws_iam_policy_document" "task_execution_secrets" {
       aws_secretsmanager_secret.airflow_conn_congressional_postgres.arn,
       aws_secretsmanager_secret.airflow_metadata_sql_alchemy_conn.arn,
       aws_secretsmanager_secret.airflow_admin_password.arn,
+      aws_secretsmanager_secret.airflow_jwt_secret.arn,
     ]
   }
 
@@ -510,6 +545,22 @@ locals {
     name      = "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"
     valueFrom = aws_secretsmanager_secret.airflow_metadata_sql_alchemy_conn.arn
   }
+
+  airflow_jwt_secret_env = {
+    name      = "AIRFLOW__API_AUTH__JWT_SECRET"
+    valueFrom = aws_secretsmanager_secret.airflow_jwt_secret.arn
+  }
+
+  # Shared by triggerer/dag-processor/api-server -- everything except
+  # scheduler (which needs 2 more entries on top of these) and migrate
+  # (needs neither). Factored out so a future shared secret only needs
+  # editing here, not in 3 separate places -- a missed edit in one of
+  # several near-identical lists is exactly how airflow_jwt_secret_env
+  # itself was originally missing everywhere until this PR.
+  base_secrets = [
+    local.airflow_metadata_conn_secret,
+    local.airflow_jwt_secret_env,
+  ]
 }
 
 resource "aws_ecs_task_definition" "scheduler" {
@@ -547,6 +598,7 @@ resource "aws_ecs_task_definition" "scheduler" {
 
       secrets = [
         local.airflow_metadata_conn_secret,
+        local.airflow_jwt_secret_env,
         { name = "AIRFLOW_CONN_CONGRESSIONAL_POSTGRES", valueFrom = aws_secretsmanager_secret.airflow_conn_congressional_postgres.arn },
         { name = "CONGRESS_API_KEY", valueFrom = data.terraform_remote_state.airflow.outputs.congress_api_key_secret_arn },
       ]
@@ -591,7 +643,7 @@ resource "aws_ecs_task_definition" "triggerer" {
         { name = "AIRFLOW__CORE__EXECUTION_API_SERVER_URL", value = local.execution_api_server_url },
       ]
 
-      secrets = [local.airflow_metadata_conn_secret]
+      secrets = local.base_secrets
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -634,7 +686,7 @@ resource "aws_ecs_task_definition" "dag_processor" {
         { name = "AIRFLOW__CORE__EXECUTION_API_SERVER_URL", value = local.execution_api_server_url },
       ]
 
-      secrets = [local.airflow_metadata_conn_secret]
+      secrets = local.base_secrets
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -683,7 +735,7 @@ resource "aws_ecs_task_definition" "api_server" {
         }
       ]
 
-      secrets = [local.airflow_metadata_conn_secret]
+      secrets = local.base_secrets
 
       logConfiguration = {
         logDriver = "awslogs"
