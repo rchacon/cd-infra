@@ -453,7 +453,7 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
 
 # The task execution role (not the task role) is what resolves each
 # container definition's `secrets` block at task launch -- needs read
-# access to all 5 secrets referenced below (2 reused from ../airflow, 3
+# access to all 6 secrets referenced below (2 reused from ../airflow, 4
 # new ones provisioned in this module) plus decrypt on the KMS key
 # protecting all of them.
 data "aws_iam_policy_document" "task_execution_secrets" {
@@ -550,6 +550,17 @@ locals {
     name      = "AIRFLOW__API_AUTH__JWT_SECRET"
     valueFrom = aws_secretsmanager_secret.airflow_jwt_secret.arn
   }
+
+  # Shared by triggerer/dag-processor/api-server -- everything except
+  # scheduler (which needs 2 more entries on top of these) and migrate
+  # (needs neither). Factored out so a future shared secret only needs
+  # editing here, not in 3 separate places -- a missed edit in one of
+  # several near-identical lists is exactly how airflow_jwt_secret_env
+  # itself was originally missing everywhere until this PR.
+  base_secrets = [
+    local.airflow_metadata_conn_secret,
+    local.airflow_jwt_secret_env,
+  ]
 }
 
 resource "aws_ecs_task_definition" "scheduler" {
@@ -632,7 +643,7 @@ resource "aws_ecs_task_definition" "triggerer" {
         { name = "AIRFLOW__CORE__EXECUTION_API_SERVER_URL", value = local.execution_api_server_url },
       ]
 
-      secrets = [local.airflow_metadata_conn_secret, local.airflow_jwt_secret_env]
+      secrets = local.base_secrets
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -675,7 +686,7 @@ resource "aws_ecs_task_definition" "dag_processor" {
         { name = "AIRFLOW__CORE__EXECUTION_API_SERVER_URL", value = local.execution_api_server_url },
       ]
 
-      secrets = [local.airflow_metadata_conn_secret, local.airflow_jwt_secret_env]
+      secrets = local.base_secrets
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -724,7 +735,7 @@ resource "aws_ecs_task_definition" "api_server" {
         }
       ]
 
-      secrets = [local.airflow_metadata_conn_secret, local.airflow_jwt_secret_env]
+      secrets = local.base_secrets
 
       logConfiguration = {
         logDriver = "awslogs"
