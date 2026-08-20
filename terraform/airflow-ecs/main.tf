@@ -201,6 +201,21 @@ resource "aws_service_discovery_http_namespace" "airflow" {
 resource "aws_ecs_cluster" "airflow" {
   name = "cd-platform-airflow"
 
+  # Publishes per-task/per-service CPU and memory utilization to
+  # CloudWatch (ECS/ContainerInsights namespace) plus a built-in
+  # CloudWatch dashboard with historical graphs -- was off by default,
+  # confirmed the hard way that debugging a real OOM (#59's
+  # fetch_member_votes) meant manually polling `docker stats` over SSM
+  # every ~20s for several minutes instead of glancing at a graph.
+  # "enabled" (the standard tier), not "enhanced" -- matches this
+  # project's cost-conscious default posture; enhanced's extra
+  # container/process-level detail isn't needed for a single-instance
+  # cluster this size.
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+
   service_connect_defaults {
     namespace = aws_service_discovery_http_namespace.airflow.arn
   }
@@ -293,6 +308,17 @@ resource "aws_iam_role_policy_attachment" "ecs_instance_ssm" {
 resource "aws_iam_role_policy_attachment" "ecs_instance_ecs" {
   role       = aws_iam_role.ecs_instance.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+
+# Lets the CloudWatch Agent (templates/user-data.sh.tftpl) publish
+# host-level memory metrics -- cloudwatch:PutMetricData plus the SSM
+# actions its own default config workflow uses (ssm:GetParameter for the
+# agent's own config, even though this instance writes its config to a
+# local file rather than Parameter Store -- harmless if unused, standard
+# AWS-managed policy for exactly this agent).
+resource "aws_iam_role_policy_attachment" "ecs_instance_cloudwatch_agent" {
+  role       = aws_iam_role.ecs_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
 resource "aws_iam_instance_profile" "ecs_instance" {
@@ -960,4 +986,100 @@ resource "aws_ecs_service" "api_server" {
   tags = {
     Project = "cd-platform"
   }
+}
+
+# Single-pane-of-glass view combining the two metric sources that only
+# exist as separate CloudWatch UIs otherwise (Container Insights'
+# built-in dashboard vs. the CloudWatch Agent's host-level metric, see
+# templates/user-data.sh.tftpl). Every widget uses a SEARCH() expression
+# rather than a hardcoded dimension -- the instance is ASG-managed (no
+# stable InstanceId across replacement) and services could be
+# added/removed later, so hardcoding either would silently go stale.
+resource "aws_cloudwatch_dashboard" "airflow" {
+  dashboard_name = "cd-platform-airflow"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 24
+        height = 6
+        properties = {
+          title   = "Host memory used (%)"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stacked = false
+          metrics = [
+            [{
+              expression = "SEARCH('{CWAgent,InstanceId} MetricName=\"mem_used_percent\"', 'Average', 300)"
+              id         = "hostMem"
+            }]
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Per-service memory utilized (Container Insights)"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stacked = false
+          metrics = [
+            [{
+              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"MemoryUtilized\"', 'Average', 300)"
+              id         = "svcMem"
+            }]
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Per-service CPU utilized (Container Insights)"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stacked = false
+          metrics = [
+            [{
+              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"CpuUtilized\"', 'Average', 300)"
+              id         = "svcCpu"
+            }]
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 12
+        width  = 24
+        height = 6
+        properties = {
+          title   = "Running vs. desired tasks per service (Container Insights)"
+          region  = var.aws_region
+          view    = "timeSeries"
+          stacked = false
+          metrics = [
+            [{
+              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"RunningTaskCount\"', 'Average', 300)"
+              id         = "svcRunning"
+            }],
+            [{
+              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"DesiredTaskCount\"', 'Average', 300)"
+              id         = "svcDesired"
+            }]
+          ]
+        }
+      }
+    ]
+  })
 }
