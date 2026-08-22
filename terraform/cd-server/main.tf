@@ -157,6 +157,17 @@ resource "aws_secretsmanager_secret" "cd_server_app_db" {
   name       = "cd-platform/cd-server/db-credentials"
   kms_key_id = aws_kms_key.cd_server.arn
 
+  # Same reasoning as ../airflow-ecs's derived secrets: AWS's default
+  # 30-day soft-delete window blocks recreating a same-named secret in
+  # one apply -- confirmed the hard way here too (this secret got marked
+  # tainted mid-iteration on this exact PR after a waiter call failed on
+  # a missing IAM grant, and the default window would have blocked
+  # replacing it). The value itself is a freshly Terraform-generated
+  # random_password, trivially regenerable, not hand-entered/
+  # irreplaceable data -- same category ../airflow-ecs's own
+  # recovery_window_in_days = 0 secrets are in.
+  recovery_window_in_days = 0
+
   tags = {
     Project = "cd-platform"
   }
