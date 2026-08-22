@@ -691,6 +691,24 @@ resource "aws_ecs_service" "cd_server" {
   task_definition = aws_ecs_task_definition.cd_server.arn
   desired_count   = var.instance_count
 
+  # cd-infra#48: cd-server's entrypoint.sh runs `alembic upgrade head`
+  # unconditionally on every start, with no dedicated one-shot migrate
+  # task to run it exactly once (unlike ../airflow-ecs's entryPoint-
+  # override pattern) -- there's only ever this one task definition/
+  # service. ECS's own defaults (100/200) start the new task *alongside*
+  # the old one during a rolling deployment, which would race two
+  # concurrent `alembic upgrade head` runs against the same
+  # cd_customers database. 0/100 forces a plain stop-then-start instead,
+  # trading a brief request-serving gap during deploys (unlike
+  # ../airflow-ecs's identical setting, this service does front live
+  # traffic via the ALB) for eliminating that race -- acceptable at this
+  # project's current traffic/deploy-frequency, worth revisiting if
+  # either grows enough to need true zero-downtime deploys (which would
+  # need a real migrate-then-deploy split in cd-platform, not just a
+  # Terraform-side change).
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.cd_server.name
     weight            = 1
