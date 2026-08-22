@@ -49,7 +49,13 @@ module "vpc" {
 # with unintended open egress by default.
 resource "aws_security_group" "rds" {
   name_prefix = "cd-platform-rds-"
-  description = "Allow Postgres from the Airflow EC2 instance, cd-api Lambda, and the cd-server ECS instance only"
+  # Deliberately left as its original text, not updated to mention
+  # cd-server (cd-infra#48) -- description is immutable on an existing
+  # security group, so editing it here would force Terraform to replace
+  # this SG entirely (destroy/recreate), briefly disrupting airflow's and
+  # cd-api's RDS connectivity too, for a purely cosmetic string change.
+  # Confirmed via a real `terraform plan` before this was reverted.
+  description = "Allow Postgres from the Airflow EC2 instance and cd-api Lambda only"
   vpc_id      = module.vpc.vpc_id
 
   lifecycle {
