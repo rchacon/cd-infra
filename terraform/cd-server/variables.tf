@@ -83,3 +83,18 @@ variable "container_memory" {
   type        = number
   default     = 400
 }
+
+# Matches cd-server/src/cd/server/settings.py's own PGDATABASE default --
+# keeping this default in sync means a real deployment never needs an
+# explicit override.
+variable "cd_customers_db_name" {
+  description = "Name of the sibling database on RDS holding cd-server's own customer data. Created idempotently by the ECS instance's first-boot bootstrap (RDS has no docker-entrypoint-initdb.d equivalent), same pattern as ../airflow's airflow_metadata_db_name."
+  type        = string
+  default     = "cd_customers"
+}
+
+variable "cd_server_db_username" {
+  description = "Postgres role cd-server connects as for ongoing runtime traffic -- scoped to cd_customers only, never the RDS master/superuser credentials (used only transiently, by the instance's boot-time bootstrap, to create this role and grant it access). Same pattern as ../airflow's cd_etl_db_username."
+  type        = string
+  default     = "cd_server_app"
+}

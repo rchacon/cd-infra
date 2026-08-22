@@ -24,6 +24,33 @@ data "aws_lambda_function" "cd_api" {
   function_name = data.terraform_remote_state.cd_api.outputs.lambda_function_name
 }
 
+# cd-infra#48: cd-server's own cd_customers database lives on this same
+# RDS instance -- rds_address to connect, master_user_secret_arn (used
+# only transiently, by the ECS instance's boot-time bootstrap below) to
+# provision cd-server's own scoped role, and rds_kms_key_arn so that
+# bootstrap can decrypt the master secret.
+data "terraform_remote_state" "rds" {
+  backend = "s3"
+  config = {
+    bucket = var.state_bucket_name
+    key    = "rds/terraform.tfstate"
+    region = var.aws_region
+  }
+}
+
+# cd-infra#48: cd-server's Cognito JWT verification (settings.py's
+# get_users_service()) needs the same User Pool cd-webapp's own login
+# flow issues tokens against -- both App Clients' IDs (prod + local dev)
+# are needed since a token minted by either must verify here.
+data "terraform_remote_state" "cd_webapp" {
+  backend = "s3"
+  config = {
+    bucket = var.state_bucket_name
+    key    = "cd-webapp/terraform.tfstate"
+    region = var.aws_region
+  }
+}
+
 # --- KMS ------------------------------------------------------------------
 #
 data "aws_caller_identity" "current" {}
@@ -97,7 +124,7 @@ data "aws_iam_policy_document" "cd_server_kms" {
 }
 
 resource "aws_kms_key" "cd_server" {
-  description             = "Encrypts the cd-server ECS container instance's root EBS volume."
+  description             = "Encrypts the cd-server ECS container instance's root EBS volume and its cd_customers DB credentials secret."
   deletion_window_in_days = 30
   enable_key_rotation     = true
   policy                  = data.aws_iam_policy_document.cd_server_kms.json
@@ -106,6 +133,45 @@ resource "aws_kms_key" "cd_server" {
 resource "aws_kms_alias" "cd_server" {
   name          = "alias/cd-platform-cd-server"
   target_key_id = aws_kms_key.cd_server.key_id
+}
+
+# --- cd_customers DB credentials (cd-infra#48) -----------------------------
+#
+# Least-privilege runtime credential for cd-server's own database traffic
+# -- the RDS master/superuser credentials (via
+# data.terraform_remote_state.rds.outputs.master_user_secret_arn) are used
+# only transiently by the ECS instance's boot-time bootstrap below, to
+# create this role and the cd_customers database, never as cd-server's own
+# runtime connection. Same pattern as ../airflow/main.tf's cd_etl_app.
+resource "random_password" "cd_server_app" {
+  length = 32
+  # No special characters -- this password gets embedded directly into a
+  # SQL string literal by the boot-time bootstrap script (see
+  # templates/user-data.sh.tftpl); alphanumeric-only sidesteps
+  # SQL-quoting escaping entirely rather than getting it right for an
+  # arbitrary character set.
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "cd_server_app_db" {
+  name       = "cd-platform/cd-server/db-credentials"
+  kms_key_id = aws_kms_key.cd_server.arn
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+# Same {"username":..., "password":...} JSON shape as RDS's own
+# master-user secret, so the boot script parses both identically, and so
+# the task definition's `secrets` block below can pull username/password
+# out via valueFrom's ":key::" suffix.
+resource "aws_secretsmanager_secret_version" "cd_server_app_db" {
+  secret_id = aws_secretsmanager_secret.cd_server_app_db.id
+  secret_string = jsonencode({
+    username = var.cd_server_db_username
+    password = random_password.cd_server_app.result
+  })
 }
 
 # --- Logs -------------------------------------------------------------------
@@ -176,6 +242,41 @@ resource "aws_iam_instance_profile" "ecs_instance" {
   role = aws_iam_role.ecs_instance.name
 }
 
+# cd-infra#48: this instance's own first-boot bootstrap (see
+# templates/user-data.sh.tftpl) creates the cd_customers database and
+# cd-server's scoped role using RDS's master credentials -- same
+# "instance bootstraps its own database, RDS has no
+# docker-entrypoint-initdb.d equivalent" pattern as ../airflow's and
+# ../airflow-ecs's instance roles.
+data "aws_iam_policy_document" "ecs_instance_bootstrap" {
+  statement {
+    sid     = "ReadBootstrapSecrets"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      data.terraform_remote_state.rds.outputs.master_user_secret_arn,
+      aws_secretsmanager_secret.cd_server_app_db.arn,
+    ]
+  }
+
+  statement {
+    sid       = "DecryptRdsMasterSecret"
+    actions   = ["kms:Decrypt"]
+    resources = [data.terraform_remote_state.rds.outputs.rds_kms_key_arn]
+  }
+
+  statement {
+    sid       = "DecryptCdServerSecrets"
+    actions   = ["kms:Decrypt"]
+    resources = [aws_kms_key.cd_server.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_instance_bootstrap" {
+  name   = "cd-platform-cd-server-ecs-instance-bootstrap"
+  role   = aws_iam_role.ecs_instance.id
+  policy = data.aws_iam_policy_document.ecs_instance_bootstrap.json
+}
+
 # --- Launch template + ASG -------------------------------------------------
 
 # ECS-optimized AL2023 AMI -- ships with the ECS agent and Docker
@@ -206,14 +307,20 @@ resource "aws_launch_template" "cd_server" {
 
   vpc_security_group_ids = [data.terraform_remote_state.networking.outputs.cd_server_security_group_id]
 
-  # No Docker Compose/manual bootstrap needed here, unlike
-  # ../airflow/templates/user-data.sh.tftpl -- the ECS-optimized AMI's
-  # agent starts on boot and just needs to know which cluster to join.
-  user_data = base64encode(<<-EOF
-    #!/bin/bash
-    echo "ECS_CLUSTER=${aws_ecs_cluster.cd_server.name}" >> /etc/ecs/ecs.config
-  EOF
-  )
+  # No manual ECS-agent/Docker install needed here -- the ECS-optimized
+  # AMI ships both preinstalled. This just points the agent at the right
+  # cluster and (cd-infra#48) idempotently bootstraps the cd_customers
+  # database/role on RDS, same pattern as ../airflow-ecs's identical
+  # template.
+  user_data = base64encode(templatefile("${path.module}/templates/user-data.sh.tftpl", {
+    ecs_cluster_name            = aws_ecs_cluster.cd_server.name
+    aws_region                  = var.aws_region
+    rds_master_secret_arn       = data.terraform_remote_state.rds.outputs.master_user_secret_arn
+    cd_server_app_db_secret_arn = aws_secretsmanager_secret.cd_server_app_db.arn
+    rds_address                 = data.terraform_remote_state.rds.outputs.rds_address
+    cd_customers_db_name        = var.cd_customers_db_name
+    cd_server_db_username       = var.cd_server_db_username
+  }))
 
   # Enforces IMDSv2 -- same reasoning as ../airflow's instance (the AWS
   # provider defaults http_tokens to "optional", which still allows the
@@ -240,6 +347,15 @@ resource "aws_launch_template" "cd_server" {
       Name    = "cd-platform-cd-server"
     }
   }
+
+  # The secret's value needs to exist before an instance's user_data can
+  # fetch it -- referencing the parent aws_secretsmanager_secret's arn
+  # above doesn't imply that ordering on its own, since this launch
+  # template and aws_secretsmanager_secret_version.cd_server_app_db each
+  # only depend on the parent aws_secretsmanager_secret, not on each
+  # other. Same reasoning as ../airflow/main.tf's aws_instance.airflow
+  # depends_on.
+  depends_on = [aws_secretsmanager_secret_version.cd_server_app_db]
 
   lifecycle {
     create_before_destroy = true
@@ -330,6 +446,30 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# cd-infra#48: the task execution role (not the task role) is what
+# resolves the container definition's `secrets` block (PGUSER/PGPASSWORD)
+# below at task launch -- needs read access to cd-server's own DB
+# credentials secret plus decrypt on the KMS key protecting it.
+data "aws_iam_policy_document" "task_execution_secrets" {
+  statement {
+    sid       = "ReadCdServerDbSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [aws_secretsmanager_secret.cd_server_app_db.arn]
+  }
+
+  statement {
+    sid       = "DecryptCdServerSecrets"
+    actions   = ["kms:Decrypt"]
+    resources = [aws_kms_key.cd_server.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "task_execution_secrets" {
+  name   = "cd-platform-cd-server-task-execution-secrets"
+  role   = aws_iam_role.task_execution.id
+  policy = data.aws_iam_policy_document.task_execution_secrets.json
+}
+
 # --- Task role (the running container's own permissions) -------------------
 
 resource "aws_iam_role" "task" {
@@ -408,9 +548,41 @@ resource "aws_ecs_task_definition" "cd_server" {
       # GRAPHIQL_ENABLED is deliberately unset -- already off by default
       # in the production image (app.py/schema.py), unlike
       # docker-compose.yml's dev service which sets it to "true".
+      #
+      # cd-infra#48: PGHOST/PGPORT/PGDATABASE plus COGNITO_USER_POOL_ID/
+      # COGNITO_REGION/COGNITO_CLIENT_IDS -- both required by
+      # settings.py's get_users_service() for any ENVIRONMENT other than
+      # "local", where their absence is a fail-fast RuntimeError at
+      # import. COGNITO_REGION assumes cd-webapp's Cognito User Pool is
+      # in this same var.aws_region -- true today (every module in this
+      # repo deploys into one region), but not something cd-webapp's own
+      # outputs expose directly to verify. COGNITO_CLIENT_IDS is
+      # comma-joined (settings.py's own parsing) from both cd-webapp App
+      # Clients sharing the one User Pool, since a token minted by either
+      # must verify here. None of PGHOST/PGPORT/PGDATABASE/
+      # COGNITO_USER_POOL_ID/COGNITO_REGION/COGNITO_CLIENT_IDS are
+      # secret -- only PGUSER/PGPASSWORD (below) go through the `secrets`
+      # block.
       environment = [
         { name = "CD_SERVER_ENVIRONMENT", value = "production" },
         { name = "CD_API_FUNCTION_NAME", value = data.aws_lambda_function.cd_api.function_name },
+        { name = "PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
+        { name = "PGPORT", value = "5432" },
+        { name = "PGDATABASE", value = var.cd_customers_db_name },
+        { name = "COGNITO_USER_POOL_ID", value = data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_id },
+        { name = "COGNITO_REGION", value = var.aws_region },
+        {
+          name = "COGNITO_CLIENT_IDS"
+          value = join(",", [
+            data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_client_id,
+            data.terraform_remote_state.cd_webapp.outputs.cognito_dev_client_id,
+          ])
+        },
+      ]
+
+      secrets = [
+        { name = "PGUSER", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:username::" },
+        { name = "PGPASSWORD", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:password::" },
       ]
 
       logConfiguration = {
