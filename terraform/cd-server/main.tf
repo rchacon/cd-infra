@@ -522,6 +522,16 @@ resource "aws_iam_role_policy" "task_permissions" {
 
 # --- Task definition ---------------------------------------------------
 
+# cd-infra#48: derived from cd-webapp's own User Pool ARN
+# (arn:aws:cognito-idp:<region>:<account-id>:userpool/<id>, index 3 of
+# the colon-split) rather than assumed to equal var.aws_region -- the two
+# modules take independent aws_region variables, so asserting equality
+# instead of deriving it would silently point JWT verification at the
+# wrong Cognito endpoint if they were ever deployed to different regions.
+locals {
+  cognito_region = split(":", data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_arn)[3]
+}
+
 # bridge networking (not awsvpc) -- avoids per-task ENI cost/churn, same
 # choice cd-infra#24 makes for Airflow's planned task defs. hostPort = 0
 # (dynamic mapping) rather than a fixed 8000 -- lets more tasks land on
@@ -561,10 +571,9 @@ resource "aws_ecs_task_definition" "cd_server" {
       # COGNITO_REGION/COGNITO_CLIENT_IDS -- both required by
       # settings.py's get_users_service() for any ENVIRONMENT other than
       # "local", where their absence is a fail-fast RuntimeError at
-      # import. COGNITO_REGION assumes cd-webapp's Cognito User Pool is
-      # in this same var.aws_region -- true today (every module in this
-      # repo deploys into one region), but not something cd-webapp's own
-      # outputs expose directly to verify. COGNITO_CLIENT_IDS is
+      # import. COGNITO_REGION is local.cognito_region, derived from
+      # cd-webapp's own User Pool ARN (see locals block above) rather
+      # than assumed equal to var.aws_region. COGNITO_CLIENT_IDS is
       # comma-joined (settings.py's own parsing) from both cd-webapp App
       # Clients sharing the one User Pool, since a token minted by either
       # must verify here. None of PGHOST/PGPORT/PGDATABASE/
@@ -578,7 +587,7 @@ resource "aws_ecs_task_definition" "cd_server" {
         { name = "PGPORT", value = "5432" },
         { name = "PGDATABASE", value = var.cd_customers_db_name },
         { name = "COGNITO_USER_POOL_ID", value = data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_id },
-        { name = "COGNITO_REGION", value = var.aws_region },
+        { name = "COGNITO_REGION", value = local.cognito_region },
         {
           name = "COGNITO_CLIENT_IDS"
           value = join(",", [
