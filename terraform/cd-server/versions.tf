@@ -10,6 +10,12 @@ terraform {
       source  = "cloudflare/cloudflare"
       version = "~> 4.0"
     }
+    # For random_password.cd_server_app (cd-infra#48) -- same pattern as
+    # ../airflow's/../airflow-ecs's identical requirement.
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 
   # Partial configuration -- bucket/key/region are supplied via `terraform

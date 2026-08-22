@@ -49,7 +49,7 @@ module "vpc" {
 # with unintended open egress by default.
 resource "aws_security_group" "rds" {
   name_prefix = "cd-platform-rds-"
-  description = "Allow Postgres from the Airflow EC2 instance and cd-api Lambda only"
+  description = "Allow Postgres from the Airflow EC2 instance, cd-api Lambda, and the cd-server ECS instance only"
   vpc_id      = module.vpc.vpc_id
 
   lifecycle {
@@ -133,6 +133,20 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_lambda" {
   to_port                      = local.postgres_port
   ip_protocol                  = "tcp"
   referenced_security_group_id = aws_security_group.lambda.id
+}
+
+# cd-server#48: cd-server's own cd_customers database (and its ECS
+# instance's boot-time bootstrap of that database/role against RDS's
+# master credentials, same pattern as ../airflow's) both need this --
+# cd_server was never granted RDS ingress when its SG was first created,
+# since it had no database wiring at the time.
+resource "aws_vpc_security_group_ingress_rule" "rds_from_cd_server" {
+  security_group_id            = aws_security_group.rds.id
+  description                  = "Postgres from the cd-server ECS instance"
+  from_port                    = local.postgres_port
+  to_port                      = local.postgres_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.cd_server.id
 }
 
 # #4's RDS Proxy reuses this same lambda SG (rather than a new dedicated
@@ -257,4 +271,17 @@ resource "aws_vpc_security_group_egress_rule" "cd_server_https" {
   ip_protocol       = "tcp"
   #trivy:ignore:AWS-0104
   cidr_ipv4 = "0.0.0.0/0"
+}
+
+# cd-server#48: cd-server connects to its own cd_customers database on
+# RDS (settings.py's PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD), and its
+# instance's own boot-time bootstrap needs the same reachability to
+# create that database/role in the first place.
+resource "aws_vpc_security_group_egress_rule" "cd_server_to_rds" {
+  security_group_id            = aws_security_group.cd_server.id
+  description                  = "Postgres to RDS"
+  from_port                    = local.postgres_port
+  to_port                      = local.postgres_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.rds.id
 }

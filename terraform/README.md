@@ -731,6 +731,19 @@ invokes `cd-api`'s Lambda directly via `boto3`, not over HTTP, so the only
 cross-component wiring needed is an IAM `lambda:InvokeFunction` grant
 (this directory's task role), not network reachability.
 
+Also reads `../rds`'s and `../cd-webapp`'s outputs (`cd-infra#48`) to wire
+up `cd-server`'s `cd_customers` database and Cognito JWT verification:
+the ECS EC2 instance's own `user-data` idempotently bootstraps the
+`cd_customers` database and a scoped `cd_server_app` role against RDS
+(RDS master credentials, used only transiently, same pattern as
+`../airflow`'s), with that role's password held in its own Secrets
+Manager secret and injected into the task definition via ECS's native
+`secrets` block; `COGNITO_USER_POOL_ID`/`COGNITO_REGION`/
+`COGNITO_CLIENT_IDS` come from `../cd-webapp`'s outputs as plain
+(non-secret) environment variables. This does need network reachability,
+unlike the Lambda wiring above -- `../networking`'s `rds`/`cd_server`
+security groups were extended with a mutual Postgres ingress/egress rule.
+
 ```bash
 cd terraform/cd-server
 cat > backend.hcl <<EOF
