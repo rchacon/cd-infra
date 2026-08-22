@@ -354,8 +354,16 @@ resource "aws_launch_template" "cd_server" {
   # template and aws_secretsmanager_secret_version.cd_server_app_db each
   # only depend on the parent aws_secretsmanager_secret, not on each
   # other. Same reasoning as ../airflow/main.tf's aws_instance.airflow
-  # depends_on.
-  depends_on = [aws_secretsmanager_secret_version.cd_server_app_db]
+  # depends_on. aws_iam_role_policy.ecs_instance_bootstrap is included for
+  # the same reason -- this launch template only references
+  # aws_iam_instance_profile.ecs_instance (the role, not its inline
+  # policy), so without this an instance could launch and its user_data
+  # could call get-secret-value before IAM propagates the bootstrap
+  # policy's permissions, failing the RDS bootstrap with AccessDenied.
+  depends_on = [
+    aws_secretsmanager_secret_version.cd_server_app_db,
+    aws_iam_role_policy.ecs_instance_bootstrap,
+  ]
 
   lifecycle {
     create_before_destroy = true
