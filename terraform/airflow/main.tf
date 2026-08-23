@@ -20,9 +20,10 @@ data "terraform_remote_state" "rds" {
 # (via `terraform state mv`, still the same live AWS resources) since it's
 # the one that still needs them going forward. Referenced here only via
 # read-only data lookups (by name/alias, not by owning the resource) --
-# this instance and its supporting IAM are being decommissioned, so these
-# just need to resolve correctly one last time for a clean `terraform
-# destroy`, not stay reusable long-term.
+# this instance and its supporting IAM stay live and depend on these
+# resolving correctly on every plan/apply for as long as they keep
+# running, right up until the actual `terraform destroy` that removes
+# them (a separate, deliberately-gated step, not part of this move).
 data "aws_kms_alias" "airflow" {
   name = "alias/cd-platform-airflow"
 }
