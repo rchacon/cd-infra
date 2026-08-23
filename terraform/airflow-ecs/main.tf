@@ -39,8 +39,23 @@ data "terraform_remote_state" "rds" {
 # random_password.cd_etl_app instead of moving it would have generated a
 # *new* password no longer matching the one already set on the live
 # cd_etl_app Postgres role.
+#
+# DO NOT `terraform apply` this module until that state mv has actually
+# run against the real backends. Applying first would try to *create*
+# these 7 resources fresh: aws_kms_alias.airflow (alias/cd-platform-airflow)
+# and both aws_secretsmanager_secret resources would fail outright
+# (AlreadyExistsException -- ../airflow's state still owns the live ones),
+# while aws_kms_key.airflow and random_password.cd_etl_app have no such
+# uniqueness constraint and would silently succeed, landing an orphaned
+# second KMS key and a *new*, non-matching cd_etl_app password in this
+# module's state -- the exact drift this move exists to avoid. Cross-module
+# resource moves can't use a `moved` block (that mechanism only rewrites
+# addresses within one state); a manual state pull/mv/push is the only way.
 resource "aws_kms_key" "airflow" {
-  description             = "Encrypts CONGRESS_API_KEY and this module's derived connection-string secrets."
+  # Same text as ../airflow's original -- deliberately unchanged, so this
+  # move produces zero diff on the next plan (confirms nothing about the
+  # live key actually changed, just which state owns it).
+  description             = "Encrypts CONGRESS_API_KEY and the airflow instance's root volume."
   deletion_window_in_days = 30
   enable_key_rotation     = true
 }
@@ -419,6 +434,18 @@ resource "aws_launch_template" "airflow" {
   lifecycle {
     create_before_destroy = true
   }
+
+  # user_data's cd_etl_app_db_secret_arn above references the *secret*
+  # (aws_secretsmanager_secret.cd_etl_app_db), not its version -- that
+  # alone doesn't force this launch template (and the ASG/instance it
+  # creates) to wait for the secret's actual *value* to be written.
+  # Explicit depends_on, same reasoning as ../airflow's original
+  # aws_instance.airflow had for the identical race (removed there since
+  # it's now a data source, not owned in the same apply). Only
+  # cd_etl_app_db matters here -- congress_api_key is injected into ECS
+  # tasks via the native `secrets` block, resolved fresh at container
+  # start, never baked into this boot-time template.
+  depends_on = [aws_secretsmanager_secret_version.cd_etl_app_db]
 }
 
 resource "aws_autoscaling_group" "airflow" {
