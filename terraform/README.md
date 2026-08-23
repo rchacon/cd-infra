@@ -130,9 +130,7 @@ never touches this instance directly. Replaces MWAA (originally scoped,
 alone.
 
 Like `rds/`, backend config and `networking/`'s state bucket name are
-supplied via gitignored `backend.hcl`/`terraform.tfvars` -- this directory's
-`terraform.tfvars` also needs one sensitive value, `congress_api_key` (from
-[api.congress.gov](https://api.congress.gov/sign-up/)). No GitHub PAT is
+supplied via gitignored `backend.hcl`/`terraform.tfvars`. No GitHub PAT is
 needed: `cd-etl`'s GHCR package is public, so both its image pull and
 watchtower's polling work anonymously.
 
@@ -146,7 +144,6 @@ encrypt = true
 EOF
 cat > terraform.tfvars <<EOF
 state_bucket_name = "<state_bucket_name from bootstrap output>"
-congress_api_key  = "<your api.congress.gov key>"
 EOF
 
 terraform init -backend-config=backend.hcl
@@ -192,14 +189,17 @@ runs; ECS's per-service health-check-driven task replacement, not
 process-exit-driven `restart:` policies, is what actually catches that
 class of bug).
 
-**Runs in parallel with `airflow/`, not as a replacement for it, until
-validated.** This directory doesn't touch `airflow/`'s EC2 instance at
-all -- both can safely run concurrently against the same RDS
-`airflow_metadata` database (Airflow's scheduler HA design exists
-precisely to let multiple scheduler processes coexist without duplicate
-task execution). Decommissioning `airflow/`'s instance is a deliberate,
-separate follow-up once a real DAG run is confirmed on ECS -- not part of
-applying this directory.
+**Ran in parallel with `airflow/` until validated (`cd-infra#42`); its EC2
+instance is being decommissioned now that it has been.** Both safely ran
+concurrently against the same RDS `airflow_metadata` database (Airflow's
+scheduler HA design exists precisely to let multiple scheduler processes
+coexist without duplicate task execution) while validation was pending.
+This module now also owns the KMS key and both Secrets Manager secrets
+`airflow/` originally created (`aws_kms_key.airflow`, `congress_api_key`,
+`cd_etl_app_db` -- moved via `terraform state mv`, not recreated, so the
+live key/secret ARNs and the already-set `cd_etl_app` Postgres password
+didn't change) -- but still doesn't touch `airflow/`'s EC2 instance
+itself; that's destroyed as a separate, explicit step.
 
 **No `cd-platform` change was needed for the migration-race problem
 `#24` originally flagged.** `cd-etl/entrypoint.sh` runs `airflow db
@@ -236,6 +236,7 @@ encrypt = true
 EOF
 cat > terraform.tfvars <<EOF
 state_bucket_name = "<state_bucket_name from bootstrap output>"
+congress_api_key  = "<your api.congress.gov key>"
 EOF
 
 terraform init -backend-config=backend.hcl
