@@ -16,69 +16,23 @@ data "terraform_remote_state" "rds" {
   }
 }
 
-# Customer-managed key (rather than the AWS-managed default) so reading
-# CONGRESS_API_KEY or the instance's root volume requires both
-# Secrets Manager/EC2 access *and* kms:Decrypt on this specific key --
-# same defense-in-depth reasoning as ../bootstrap's state-bucket key and
-# ../rds's storage key, and the same flat ~$1/mo. Shared by both uses
-# below rather than provisioning a second key, since they're both this
-# component's own data at rest.
-resource "aws_kms_key" "airflow" {
-  description             = "Encrypts CONGRESS_API_KEY and the airflow instance's root volume."
-  deletion_window_in_days = 30
-  enable_key_rotation     = true
+# cd-infra#42: the KMS key and both secrets below moved to ../airflow-ecs
+# (via `terraform state mv`, still the same live AWS resources) since it's
+# the one that still needs them going forward. Referenced here only via
+# read-only data lookups (by name/alias, not by owning the resource) --
+# this instance and its supporting IAM are being decommissioned, so these
+# just need to resolve correctly one last time for a clean `terraform
+# destroy`, not stay reusable long-term.
+data "aws_kms_alias" "airflow" {
+  name = "alias/cd-platform-airflow"
 }
 
-resource "aws_kms_alias" "airflow" {
-  name          = "alias/cd-platform-airflow"
-  target_key_id = aws_kms_key.airflow.key_id
+data "aws_secretsmanager_secret" "congress_api_key" {
+  name = "cd-platform/airflow/congress-api-key"
 }
 
-resource "aws_secretsmanager_secret" "congress_api_key" {
-  name       = "cd-platform/airflow/congress-api-key"
-  kms_key_id = aws_kms_key.airflow.arn
-
-  tags = {
-    Project = "cd-platform"
-  }
-}
-
-resource "aws_secretsmanager_secret_version" "congress_api_key" {
-  secret_id     = aws_secretsmanager_secret.congress_api_key.id
-  secret_string = var.congress_api_key
-}
-
-# Least-privilege runtime credential for cd-etl/Airflow's ongoing database
-# traffic -- the RDS master/superuser credentials (above, via
-# rds_master_secret_arn) are used only transiently by this instance's
-# boot-time bootstrap, to create this role and the airflow_metadata
-# database, never as the app's own runtime connection.
-resource "random_password" "cd_etl_app" {
-  length = 32
-  # No special characters -- this password gets embedded directly into a
-  # SQL string literal by the boot-time bootstrap script (see
-  # user-data.sh.tftpl); alphanumeric-only sidesteps SQL-quoting escaping
-  # entirely rather than getting it right for an arbitrary character set.
-  special = false
-}
-
-resource "aws_secretsmanager_secret" "cd_etl_app_db" {
-  name       = "cd-platform/airflow/cd-etl-db-credentials"
-  kms_key_id = aws_kms_key.airflow.arn
-
-  tags = {
-    Project = "cd-platform"
-  }
-}
-
-# Same {"username":..., "password":...} JSON shape as RDS's own
-# master-user secret, so the boot script parses both identically.
-resource "aws_secretsmanager_secret_version" "cd_etl_app_db" {
-  secret_id = aws_secretsmanager_secret.cd_etl_app_db.id
-  secret_string = jsonencode({
-    username = var.cd_etl_db_username
-    password = random_password.cd_etl_app.result
-  })
+data "aws_secretsmanager_secret" "cd_etl_app_db" {
+  name = "cd-platform/airflow/cd-etl-db-credentials"
 }
 
 data "aws_iam_policy_document" "airflow_assume_role" {
@@ -115,8 +69,8 @@ data "aws_iam_policy_document" "airflow_instance" {
     sid     = "ReadSecrets"
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
-      aws_secretsmanager_secret.congress_api_key.arn,
-      aws_secretsmanager_secret.cd_etl_app_db.arn,
+      data.aws_secretsmanager_secret.congress_api_key.arn,
+      data.aws_secretsmanager_secret.cd_etl_app_db.arn,
       data.terraform_remote_state.rds.outputs.master_user_secret_arn,
     ]
   }
@@ -129,8 +83,8 @@ data "aws_iam_policy_document" "airflow_instance" {
     sid     = "DecryptAirflowSecrets"
     actions = ["kms:Decrypt"]
     resources = [
-      aws_kms_key.airflow.arn,
-      aws_kms_alias.airflow.arn,
+      data.aws_kms_alias.airflow.target_key_arn,
+      data.aws_kms_alias.airflow.arn,
     ]
   }
 
@@ -183,8 +137,8 @@ resource "aws_instance" "airflow" {
 
   user_data = templatefile("${path.module}/templates/user-data.sh.tftpl", {
     aws_region                  = var.aws_region
-    congress_api_key_secret_arn = aws_secretsmanager_secret.congress_api_key.arn
-    cd_etl_app_db_secret_arn    = aws_secretsmanager_secret.cd_etl_app_db.arn
+    congress_api_key_secret_arn = data.aws_secretsmanager_secret.congress_api_key.arn
+    cd_etl_app_db_secret_arn    = data.aws_secretsmanager_secret.cd_etl_app_db.arn
     rds_master_secret_arn       = data.terraform_remote_state.rds.outputs.master_user_secret_arn
     rds_address                 = data.terraform_remote_state.rds.outputs.rds_address
     airflow_metadata_db_name    = var.airflow_metadata_db_name
@@ -199,16 +153,6 @@ resource "aws_instance" "airflow" {
   # user-data edit -- acceptable for a single once-a-day batch job with no
   # live traffic to preserve.
   user_data_replace_on_change = true
-
-  # Both secrets need their actual values written before this instance's
-  # user_data can fetch them -- referencing the parent secrets' ARNs above
-  # doesn't imply that ordering on its own, since aws_instance.airflow and
-  # each aws_secretsmanager_secret_version only depend on their own parent
-  # aws_secretsmanager_secret, not on each other.
-  depends_on = [
-    aws_secretsmanager_secret_version.congress_api_key,
-    aws_secretsmanager_secret_version.cd_etl_app_db,
-  ]
 
   # Ignore subsequent AMI changes after first creation -- otherwise every
   # AWS-published AL2023 arm64 build would show as an unprompted
@@ -233,7 +177,7 @@ resource "aws_instance" "airflow" {
   # already exists.
   root_block_device {
     encrypted  = true
-    kms_key_id = aws_kms_key.airflow.arn
+    kms_key_id = data.aws_kms_alias.airflow.target_key_arn
   }
 
   tags = {

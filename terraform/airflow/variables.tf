@@ -27,12 +27,6 @@ variable "github_repository_owner" {
   default     = "rchacon"
 }
 
-variable "congress_api_key" {
-  description = "API key for api.congress.gov, stored in Secrets Manager and fetched by the instance at boot. Get one at https://api.congress.gov/sign-up/."
-  type        = string
-  sensitive   = true
-}
-
 variable "airflow_metadata_db_name" {
   description = "Name of the sibling database on RDS holding Airflow's own metadata (matches local dev's docker-compose.yml). Created idempotently by the instance's first-boot bootstrap (RDS has no docker-entrypoint-initdb.d equivalent) -- see terraform/README.md."
   type        = string
