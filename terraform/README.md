@@ -2,14 +2,14 @@
 
 AWS infrastructure for this repo, provisioned incrementally by component:
 `bootstrap/` (state backend, one-time), `networking/` (#1), `rds/` (#2),
-`airflow/` (#3), `cd-api/` (#4), `amplify/` (Hosting for the `cd-website`
+`cd-api/` (#4), `amplify/` (Hosting for the `cd-website`
 repo's two apps), `cd-webapp/` (Amplify Hosting + Cognito for the customer
 portal, `rchacon/cd-webapp`), `cd-server/` (ECS on EC2 + ALB for
 `rchacon/cd-platform`'s `cd-server`, at `server.civicdog.com`),
-`airflow-ecs/` (Airflow decomposed onto 4 ECS services, #22/#24 --
-runs alongside `airflow/` until validated, see that directory's own
-section for the cutover plan). See #5 for the overall AWS deployment
-tracking issue.
+`airflow-ecs/` (self-hosted Airflow on 4 ECS services, #3/#22/#24 --
+originally `airflow/`, a single EC2 instance; decomposed onto ECS and,
+once validated, that original instance was decommissioned, #42). See #5
+for the overall AWS deployment tracking issue.
 
 See the root `README.md` for an architecture diagram of the VPC, security
 groups, and planned compute resources.
@@ -72,8 +72,8 @@ terraform apply
 Defaults: `us-west-2`, VPC CIDR `10.0.0.0/16`, 2 AZs. NAT gateway is on
 (`enable_nat_gateway = true`, one shared gateway rather than one per AZ --
 cheaper, at the cost of a single point of failure -- see `variables.tf` to
-change either) since `airflow/` (#3) needs outbound internet from its
-private subnet. `airflow/`/`cd-api/` (#3/#4) read this state's outputs
+change either) since `airflow-ecs/` (#3) needs outbound internet from its
+private subnet. `airflow-ecs/`/`cd-api/` (#3/#4) read this state's outputs
 (`vpc_id`, subnet IDs, security group IDs) via `terraform_remote_state`,
 using the same `backend.hcl` pattern with a different `key`.
 
@@ -111,76 +111,18 @@ terraform apply
 **Schema bootstrap is intentionally not part of this directory.** The RDS
 security group only ever accepts connections from the `airflow`/`lambda`
 security groups (#1), so there's no durable way to reach this instance
-until `airflow/`'s EC2 instance exists inside the VPC. `cd-etl`'s own
+until `airflow-ecs/`'s EC2 instance exists inside the VPC. `cd-etl`'s own
 schema migrations (`alembic upgrade head`) and Airflow's own metadata
 migrations both run automatically, baked into the `cd-etl` container's
 entrypoint on every start -- no manual step for either. The one exception
 is the sibling `airflow_metadata` database itself, which needs a one-time
-manual `CREATE DATABASE`, covered in `airflow/`'s section below.
+manual `CREATE DATABASE`, covered in `airflow-ecs/`'s section below.
 
-## `airflow/` -- self-hosted Airflow on EC2
+## `airflow-ecs/` -- self-hosted Airflow on ECS (EC2)
 
-A small EC2 instance (`t3.small` by default, x86_64 -- cd-etl's GHCR image is
-amd64-only) running `cd-platform/cd-etl`'s
-Docker image continuously, in `networking/`'s private subnets and `airflow`
-security group. A sidecar `watchtower` container polls GHCR for new
-`cd-etl-vX.X.X` releases and auto-updates -- CI only ever pushes to GHCR,
-never touches this instance directly. Replaces MWAA (originally scoped,
-~$358/mo for one lightweight daily DAG) at ~$6-12/mo for the EC2 instance
-alone.
-
-Like `rds/`, backend config and `networking/`'s state bucket name are
-supplied via gitignored `backend.hcl`/`terraform.tfvars`. No GitHub PAT is
-needed: `cd-etl`'s GHCR package is public, so both its image pull and
-watchtower's polling work anonymously.
-
-```bash
-cd terraform/airflow
-cat > backend.hcl <<EOF
-bucket  = "<state_bucket_name from bootstrap output>"
-key     = "airflow/terraform.tfstate"
-region  = "us-west-2"
-encrypt = true
-EOF
-cat > terraform.tfvars <<EOF
-state_bucket_name = "<state_bucket_name from bootstrap output>"
-EOF
-
-terraform init -backend-config=backend.hcl
-terraform plan
-terraform apply
-```
-
-**`airflow_metadata` and a least-privilege database role are bootstrapped
-automatically on first boot**, not by Terraform itself -- RDS has no
-`docker-entrypoint-initdb.d` equivalent, and this instance is the only
-thing that can reach RDS at all (per its security group), so `user-data`
-runs an idempotent `psql` bootstrap using the RDS master/superuser
-credentials to (1) create the `airflow_metadata` database and (2) create
-(or update the password of) a scoped `cd_etl_db_username` role, granted
-access to both `cd_platform` and `airflow_metadata` only. `cd-etl`'s
-container connects as that scoped role, never the RDS master user -- the
-master credentials are used only transiently, at boot, for this bootstrap.
-
-**The Airflow UI (port 8080) has no public ingress, ever** -- access it via
-SSM Session Manager port-forwarding, not a VPN (a VPN's per-subnet-
-association billing alone would dwarf this project's entire AWS spend for
-occasional admin access to one DAG's UI):
-
-```bash
-# Shell session (e.g. for `docker logs`, or re-running the bootstrap by hand):
-aws ssm start-session --target "$(terraform output -raw instance_id)"
-
-# Port-forward the Airflow UI to localhost:8080:
-aws ssm start-session --target "$(terraform output -raw instance_id)" \
-  --document-name AWS-StartPortForwardingSession \
-  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
-```
-
-## `airflow-ecs/` -- Airflow decomposed onto ECS (EC2)
-
-Decomposes `airflow/`'s single `airflow standalone` container into 4
-independent ECS services (`scheduler`, `triggerer`, `dag-processor`,
+Decomposes what was originally a single `airflow standalone` container
+(self-hosted on a plain EC2 instance, `terraform/airflow/`, since removed)
+into 4 independent ECS services (`scheduler`, `triggerer`, `dag-processor`,
 `api-server`), each its own task definition, on a dedicated ECS cluster
 (EC2 launch type, `t3.medium`) -- see `cd-infra#22`/`#24` for the incident
 and reasoning (a subprocess dying silently inside `airflow standalone`
@@ -189,17 +131,17 @@ runs; ECS's per-service health-check-driven task replacement, not
 process-exit-driven `restart:` policies, is what actually catches that
 class of bug).
 
-**Ran in parallel with `airflow/` until validated (`cd-infra#42`); its EC2
-instance is being decommissioned now that it has been.** Both safely ran
-concurrently against the same RDS `airflow_metadata` database (Airflow's
-scheduler HA design exists precisely to let multiple scheduler processes
-coexist without duplicate task execution) while validation was pending.
-This module now also owns the KMS key and both Secrets Manager secrets
-`airflow/` originally created (`aws_kms_key.airflow`, `congress_api_key`,
+**This is now the sole Airflow deployment** -- it ran alongside the
+original EC2 instance until validated, then that instance was
+decommissioned (`cd-infra#42`) once `congress_members_etl`/`bills_etl`
+were confirmed completing successfully on this cluster's scheduler. This
+module owns the KMS key and both Secrets Manager secrets the EC2 instance
+originally created (`aws_kms_key.airflow`, `congress_api_key`,
 `cd_etl_app_db` -- moved via `terraform state mv`, not recreated, so the
 live key/secret ARNs and the already-set `cd_etl_app` Postgres password
-didn't change) -- but still doesn't touch `airflow/`'s EC2 instance
-itself; that's destroyed as a separate, explicit step.
+never changed) and does its own equivalent `airflow_metadata`/`cd_etl_app`
+RDS bootstrap (see below) -- nothing here reads another directory's state
+for Airflow-specific values anymore.
 
 **No `cd-platform` change was needed for the migration-race problem
 `#24` originally flagged.** `cd-etl/entrypoint.sh` runs `airflow db
@@ -245,9 +187,7 @@ terraform apply
 ```
 
 **Running the one-shot migration task** -- do this once right after the
-first `apply` (the RDS schema is already current from `airflow/`'s own
-instance, but this is still worth confirming end-to-end), and again after
-any future `cd-etl` release:
+first `apply`, and again after any future `cd-etl` release:
 
 ```bash
 aws ecs run-task \
@@ -261,18 +201,19 @@ aws ecs describe-tasks --cluster "$(terraform output -raw ecs_cluster_name)" \
   --query 'tasks[0].containers[0].exitCode'
 ```
 
-**Debugging a service** -- `aws ecs execute-command` replaces the SSM
-RunCommand + `docker exec` flow `airflow/` needs today:
+**Debugging a service** -- `aws ecs execute-command` gives a shell on any
+task, replacing the SSM RunCommand + `docker exec` flow the old EC2
+instance needed:
 
 ```bash
 aws ecs execute-command --cluster "$(terraform output -raw ecs_cluster_name)" \
   --task <task-arn> --container scheduler --interactive --command "/bin/sh"
 ```
 
-**Logging into the UI** -- same SSM port-forward pattern as `airflow/`'s
-own instance (`api-server` publishes a fixed host port 8080 for exactly
-this), just against this module's container instance rather than
-`airflow/`'s:
+**Logging into the UI** -- same "no public ingress, SSM port-forward only"
+posture as the old EC2 instance had, just against this module's own
+container instance (`api-server` publishes a fixed host port 8080 for
+exactly this):
 
 ```bash
 INSTANCE_ID=$(aws ecs list-container-instances --cluster "$(terraform output -raw ecs_cluster_name)" --query 'containerInstanceArns[0]' --output text | xargs -I{} aws ecs describe-container-instances --cluster "$(terraform output -raw ecs_cluster_name)" --container-instances {} --query 'containerInstances[0].ec2InstanceId' --output text)
@@ -347,10 +288,10 @@ terraform apply
 ```
 
 **The `cd_api_app` database role is bootstrapped manually, not by
-Terraform** (mirrors `rds/`'s and `airflow/`'s own precedent) -- Lambda has
-no "runs once at boot" hook the way EC2's `user-data` does, and building
-one would mean adding actual `cd-api` app code just for this. Unlike
-`airflow/`'s `cd_etl_app` (which owns the tables it creates via its own
+Terraform** (mirrors `rds/`'s and `airflow-ecs/`'s own precedent) -- Lambda
+has no "runs once at boot" hook the way EC2's `user-data` does, and
+building one would mean adding actual `cd-api` app code just for this.
+Unlike `cd_etl_app` (which owns the tables it creates via its own
 migrations), `cd_api_app` is a read-only *consumer* of tables `cd_etl_app`
 owns -- `cd-api` never writes (confirmed against `cd-api/src/db.py`: one
 `SELECT`, nothing else), so its grants are `SELECT`-only, and since
@@ -363,19 +304,23 @@ can only be run by that role itself or a member of it -- confirmed on a
 real apply that even RDS's master user (`rds_superuser`, not a true
 Postgres `SUPERUSER`) needs an explicit `GRANT "cd_etl_app" TO` itself
 first, or it fails with `permission denied to change default privileges`.
-Run once, right after `terraform apply`, from a directory holding both
-this and `../rds`/`../airflow`'s outputs:
+Run once, right after `terraform apply`:
 
 ```bash
 CD_API_APP_PASSWORD="$(terraform output -raw cd_api_app_db_password)"
 RDS_SECRET_ARN="$(terraform -chdir=../rds output -raw master_user_secret_arn)"
 RDS_ADDRESS="$(terraform -chdir=../rds output -raw rds_address)"
-AIRFLOW_INSTANCE_ID="$(terraform -chdir=../airflow output -raw instance_id)"
+# This was originally run via ../airflow's EC2 instance (now decommissioned,
+# cd-infra#42) -- its instance_id output no longer exists. If this ever
+# needs re-running, get a target instance ID from ../airflow-ecs instead,
+# via the same aws ecs list-container-instances/describe-container-instances
+# lookup its own section below uses.
+AIRFLOW_INSTANCE_ID="<instance ID reachable via SSM, see note above>"
 
 # Write the bootstrap script locally, with the values above already
 # substituted in -- avoids nesting shell-quoting through SSM's own JSON
-# parameter encoding. Same idempotent \gexec pattern airflow/'s bootstrap
-# already validated works (sidesteps bash expanding an unescaped `$$` in a
+# parameter encoding. Same idempotent \gexec pattern this bootstrap
+# validated works (sidesteps bash expanding an unescaped `$$` in a
 # heredoc to its own PID, which would corrupt Postgres's DO $$ ... $$
 # dollar-quoting).
 cat > /tmp/cd-api-db-bootstrap.sh <<SCRIPT
