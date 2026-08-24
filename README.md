@@ -27,8 +27,7 @@ flowchart TB
             lambda_sg{{"lambda SG"}}
             cd_server_sg{{"cd_server SG"}}
             rds[("RDS Postgres<br/>#2")]
-            airflow["Airflow EC2<br/>#3"]
-            airflow_ecs["Airflow ECS (EC2)<br/>#22, #24<br/>(parallel w/ Airflow EC2)"]
+            airflow_ecs["Airflow ECS (EC2)<br/>#3, #22, #24"]
             lambda["cd-api Lambda<br/>#4<br/>(+ RDS Proxy)"]
             cd_server["cd-server ECS (EC2)"]
         end
@@ -48,8 +47,7 @@ flowchart TB
     pub -- "dynamic host port" --> cd_server
 
     rds -- protected by --> rds_sg
-    airflow -- attaches to --> airflow_sg
-    airflow_ecs -- "attaches to (same SG, reused)" --> airflow_sg
+    airflow_ecs -- attaches to --> airflow_sg
     lambda -- attaches to --> lambda_sg
     cd_server -- attaches to --> cd_server_sg
 
@@ -61,37 +59,36 @@ flowchart TB
     cd_server -- "lambda:InvokeFunction (IAM only, no network hop)" --> lambda
 ```
 
-RDS (#2), the Airflow EC2 instance (#3), cd-api's Lambda + API Gateway
-(#4), cd-server's ECS (EC2) service + ALB, and Airflow's own decomposed
-ECS (EC2) cluster (`#22`/`#24`, `airflow-ecs/`) are all provisioned --
-nothing left planned/dashed. `airflow_ecs` runs **alongside** the
-original `airflow` EC2 node above, not in place of it -- both are live
-simultaneously, sharing the same `airflow` security group (reused as-is,
-not a second one) and the same RDS `airflow_metadata` database (safe
-under Airflow's own scheduler-HA row-locking design). The original
-instance is decommissioned only once a full DAG run is confirmed on ECS,
-a deliberate separate follow-up documented in `terraform/README.md`, not
-shown as removed here yet. RDS is encrypted
-under its own customer-managed KMS key, single-AZ, reachable only from the
+RDS (#2), self-hosted Airflow (#3, now `airflow_ecs` -- decomposed onto 4
+ECS services per `#22`/`#24`), cd-api's Lambda + API Gateway (#4), and
+cd-server's ECS (EC2) service + ALB are all provisioned -- nothing left
+planned/dashed. `airflow_ecs` originally ran **alongside** a single plain
+EC2 instance (`terraform/airflow/`) while the ECS decomposition was being
+validated, sharing that instance's `airflow` security group, KMS key, and
+Secrets Manager secrets rather than provisioning duplicates; once
+validated, that original instance was decommissioned (`#42`) and this
+module absorbed direct ownership of the shared KMS key/secrets (moved via
+`terraform state mv`, not recreated). RDS is encrypted under its own
+customer-managed KMS key, single-AZ, reachable only from the
 `airflow`/`lambda` security groups; its schema comes from `cd-etl`'s
-container migrating itself on every start, run from the Airflow instance
--- the only durable path to reach RDS. The sibling `airflow_metadata`
-database and a scoped least-privilege database role are both bootstrapped
-automatically on the Airflow instance's first boot (RDS has no equivalent
-to a Postgres init script), using the RDS master credentials only
-transiently -- `cd-etl` connects as the scoped role, never the master
-user. Documented in `terraform/README.md`. The Airflow instance itself has
-no public ingress at all -- runs `cd-etl` + a `watchtower` sidecar polling
-GHCR for new releases, and is reachable only via SSM Session Manager
-(shell or port-forwarding to its UI), never a public IP.
+container migrating itself on every start, run from the Airflow ECS
+instance -- the only durable path to reach RDS. The sibling
+`airflow_metadata` database and a scoped least-privilege database role
+are both bootstrapped automatically on that instance's first boot (RDS
+has no equivalent to a Postgres init script), using the RDS master
+credentials only transiently -- `cd-etl` connects as the scoped role,
+never the master user. Documented in `terraform/README.md`. The instance
+itself has no public ingress at all -- runs `cd-etl`'s 4 ECS services and
+is reachable only via SSM Session Manager (shell or port-forwarding to
+the Airflow UI), never a public IP.
 
 cd-api's Lambda sits behind API Gateway (a static API key gates access for
 now, a deliberate MVP stopgap) and reaches RDS through RDS Proxy -- omitted
 as its own node above since it reuses the `lambda` security group entirely
 (the `lambda_sg -- Postgres :5432 --> rds_sg` edge already covers it at the
 network level), with its own scoped least-privilege database role
-bootstrapped manually (not automatically, unlike `airflow/`'s -- Lambda has
-no boot-time hook to run it from), documented in `terraform/README.md`.
+bootstrapped manually (not automatically, unlike `airflow_ecs`'s -- Lambda
+has no boot-time hook to run it from), documented in `terraform/README.md`.
 `bootstrap/`'s S3 state bucket/KMS key/GitHub OIDC provider and every
 component's own KMS key aren't part of this diagram -- they're supporting
 resources, not part of the app's runtime traffic path.
@@ -99,8 +96,8 @@ resources, not part of the app's runtime traffic path.
 `server.civicdog.com` is a Cloudflare-managed CNAME onto a public ALB
 (`cd-server/`), which forwards to `cd-server`'s ECS service -- **EC2**
 launch type, not Fargate (cheaper for an always-on workload, same stance
-`cd-infra#24` takes for Airflow's planned decomposition), a separate
-cluster/instance from that future Airflow-on-ECS work. Unlike every other
+`cd-infra#24` takes for Airflow's own ECS decomposition), a separate
+cluster/instance from `airflow_ecs` above. Unlike every other
 custom domain in this repo, its ACM certificate is regional (`us-west-2`,
 matching the ALB's own region) rather than requiring `us-east-1` --
 API Gateway's/Amplify's/Cognito's CloudFront-backed custom domains are

@@ -29,46 +29,112 @@ data "terraform_remote_state" "rds" {
   }
 }
 
-# Only for its 5 new outputs (congress_api_key_secret_arn,
-# cd_etl_app_db_secret_arn, airflow_kms_key_arn/_alias_arn,
-# instance_private_ip is unused) -- this module reuses ../airflow's
-# existing secrets/KMS key for the same underlying RDS role rather than
-# provisioning duplicates. ../airflow's own EC2 instance keeps running
-# unaffected throughout -- this module only reads its state, never
-# writes to it.
-data "terraform_remote_state" "airflow" {
-  backend = "s3"
-  config = {
-    bucket = var.state_bucket_name
-    key    = "airflow/terraform.tfstate"
-    region = var.aws_region
+# --- Resources moved from ../airflow (cd-infra#42) ---------------------
+#
+# Originally owned by ../airflow/main.tf, moved here via `terraform state
+# mv` (not recreated) as part of decommissioning ../airflow's EC2
+# instance -- these are still the exact same live KMS key/secrets/password
+# ../airflow-ecs's tasks always depended on, just now owned by this
+# module's own state instead of read cross-state. Recreating
+# random_password.cd_etl_app instead of moving it would have generated a
+# *new* password no longer matching the one already set on the live
+# cd_etl_app Postgres role.
+#
+# DO NOT `terraform apply` this module until that state mv has actually
+# run against the real backends. Applying first would try to *create*
+# these 7 resources fresh: aws_kms_alias.airflow (alias/cd-platform-airflow)
+# and both aws_secretsmanager_secret resources would fail outright
+# (AlreadyExistsException -- ../airflow's state still owns the live ones),
+# while aws_kms_key.airflow and random_password.cd_etl_app have no such
+# uniqueness constraint and would silently succeed, landing an orphaned
+# second KMS key and a *new*, non-matching cd_etl_app password in this
+# module's state -- the exact drift this move exists to avoid. Cross-module
+# resource moves can't use a `moved` block (that mechanism only rewrites
+# addresses within one state); a manual state pull/mv/push is the only way.
+resource "aws_kms_key" "airflow" {
+  # Same text as ../airflow's original -- deliberately unchanged, so this
+  # move produces zero diff on the next plan (confirms nothing about the
+  # live key actually changed, just which state owns it).
+  description             = "Encrypts CONGRESS_API_KEY and the airflow instance's root volume."
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+}
+
+resource "aws_kms_alias" "airflow" {
+  name          = "alias/cd-platform-airflow"
+  target_key_id = aws_kms_key.airflow.key_id
+}
+
+resource "aws_secretsmanager_secret" "congress_api_key" {
+  name       = "cd-platform/airflow/congress-api-key"
+  kms_key_id = aws_kms_key.airflow.arn
+
+  tags = {
+    Project = "cd-platform"
   }
+}
+
+resource "aws_secretsmanager_secret_version" "congress_api_key" {
+  secret_id     = aws_secretsmanager_secret.congress_api_key.id
+  secret_string = var.congress_api_key
+}
+
+# Least-privilege runtime credential for cd-etl/Airflow's ongoing database
+# traffic -- the RDS master/superuser credentials are used only
+# transiently by each instance's boot-time bootstrap, to create this role
+# and the airflow_metadata database, never as the app's own runtime
+# connection.
+resource "random_password" "cd_etl_app" {
+  length = 32
+  # No special characters -- this password gets embedded directly into a
+  # SQL string literal by both this module's and ../airflow's (historical)
+  # boot-time bootstrap scripts; alphanumeric-only sidesteps SQL-quoting
+  # escaping entirely rather than getting it right for an arbitrary
+  # character set.
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "cd_etl_app_db" {
+  name       = "cd-platform/airflow/cd-etl-db-credentials"
+  kms_key_id = aws_kms_key.airflow.arn
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+# Same {"username":..., "password":...} JSON shape as RDS's own
+# master-user secret, so boot scripts parse both identically.
+resource "aws_secretsmanager_secret_version" "cd_etl_app_db" {
+  secret_id = aws_secretsmanager_secret.cd_etl_app_db.id
+  secret_string = jsonencode({
+    username = var.cd_etl_db_username
+    password = random_password.cd_etl_app.result
+  })
 }
 
 # --- Derived connection-string secrets -------------------------------
 #
-# Live read of ../airflow's existing cd_etl_app credentials (created
-# there, not here) -- used only to interpolate the two connection
-# strings below, never stored in this module's own state beyond what
-# Terraform already tracks for any resource attribute.
-data "aws_secretsmanager_secret_version" "cd_etl_app_db" {
-  secret_id = data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn
-}
-
+# Reads the cd_etl_app credentials created just above -- used only to
+# interpolate the two connection strings below, never stored in this
+# module's own state beyond what Terraform already tracks for any
+# resource attribute.
 locals {
-  cd_etl_app_db_creds = jsondecode(data.aws_secretsmanager_secret_version.cd_etl_app_db.secret_string)
+  cd_etl_app_db_creds = {
+    username = var.cd_etl_db_username
+    password = random_password.cd_etl_app.result
+  }
 
-  # Safe to interpolate directly with no URL-encoding -- ../airflow/main.tf's
-  # random_password.cd_etl_app is special = false (alphanumeric-only),
-  # unlike a general RDS-managed password. db name ("cd_platform") matches
-  # ../rds/main.tf's aws_db_instance.this db_name, same as
-  # ../airflow/templates/user-data.sh.tftpl's identical connection string.
+  # Safe to interpolate directly with no URL-encoding -- random_password.cd_etl_app
+  # above is special = false (alphanumeric-only), unlike a general
+  # RDS-managed password. db name ("cd_platform") matches ../rds/main.tf's
+  # aws_db_instance.this db_name.
   airflow_conn_congressional_postgres = "postgresql://${local.cd_etl_app_db_creds.username}:${local.cd_etl_app_db_creds.password}@${data.terraform_remote_state.rds.outputs.rds_address}:5432/cd_platform"
   airflow_metadata_sql_alchemy_conn   = "postgresql+psycopg2://${local.cd_etl_app_db_creds.username}:${local.cd_etl_app_db_creds.password}@${data.terraform_remote_state.rds.outputs.rds_address}:5432/${var.airflow_metadata_db_name}"
 }
 
-# Reuses ../airflow's existing KMS key (via remote state) rather than
-# provisioning a second one -- this is the same underlying credential
+# Reuses this module's own KMS key (moved from ../airflow above) rather
+# than provisioning a second one -- this is the same underlying credential
 # material, just precomputed into ready-to-inject connection strings so
 # ECS's native `secrets` block can hand them to containers directly,
 # without ../airflow/templates/user-data.sh.tftpl's boot-time
@@ -86,7 +152,7 @@ locals {
 # 30-day recovery safety net isn't worth the recreate friction here.
 resource "aws_secretsmanager_secret" "airflow_conn_congressional_postgres" {
   name                    = "cd-platform/airflow-ecs/airflow-conn-congressional-postgres"
-  kms_key_id              = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  kms_key_id              = aws_kms_key.airflow.arn
   recovery_window_in_days = 0
 
   tags = {
@@ -101,7 +167,7 @@ resource "aws_secretsmanager_secret_version" "airflow_conn_congressional_postgre
 
 resource "aws_secretsmanager_secret" "airflow_metadata_sql_alchemy_conn" {
   name                    = "cd-platform/airflow-ecs/airflow-metadata-sql-alchemy-conn"
-  kms_key_id              = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  kms_key_id              = aws_kms_key.airflow.arn
   recovery_window_in_days = 0
 
   tags = {
@@ -134,7 +200,7 @@ resource "random_password" "airflow_admin" {
 
 resource "aws_secretsmanager_secret" "airflow_admin_password" {
   name                    = "cd-platform/airflow-ecs/airflow-admin-password"
-  kms_key_id              = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  kms_key_id              = aws_kms_key.airflow.arn
   recovery_window_in_days = 0
 
   tags = {
@@ -168,7 +234,7 @@ resource "random_password" "airflow_jwt_secret" {
 
 resource "aws_secretsmanager_secret" "airflow_jwt_secret" {
   name                    = "cd-platform/airflow-ecs/airflow-jwt-secret"
-  kms_key_id              = data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn
+  kms_key_id              = aws_kms_key.airflow.arn
   recovery_window_in_days = 0
 
   tags = {
@@ -248,7 +314,7 @@ data "aws_iam_policy_document" "ecs_instance_bootstrap" {
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
       data.terraform_remote_state.rds.outputs.master_user_secret_arn,
-      data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn,
+      aws_secretsmanager_secret.cd_etl_app_db.arn,
     ]
   }
 
@@ -265,8 +331,8 @@ data "aws_iam_policy_document" "ecs_instance_bootstrap" {
     sid     = "DecryptAirflowSecrets"
     actions = ["kms:Decrypt"]
     resources = [
-      data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn,
-      data.terraform_remote_state.airflow.outputs.airflow_kms_alias_arn,
+      aws_kms_key.airflow.arn,
+      aws_kms_alias.airflow.arn,
     ]
   }
 }
@@ -329,7 +395,7 @@ resource "aws_launch_template" "airflow" {
   user_data = base64encode(templatefile("${path.module}/templates/user-data.sh.tftpl", {
     aws_region               = var.aws_region
     rds_master_secret_arn    = data.terraform_remote_state.rds.outputs.master_user_secret_arn
-    cd_etl_app_db_secret_arn = data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn
+    cd_etl_app_db_secret_arn = aws_secretsmanager_secret.cd_etl_app_db.arn
     rds_address              = data.terraform_remote_state.rds.outputs.rds_address
     airflow_metadata_db_name = var.airflow_metadata_db_name
     cd_etl_db_username       = var.cd_etl_db_username
@@ -342,11 +408,12 @@ resource "aws_launch_template" "airflow" {
   }
 
   # Deliberately no customer-managed kms_key_id here (default EBS
-  # encryption instead) -- reusing ../airflow's existing key would need
-  # that key's policy extended with an AWSServiceRoleForAutoScaling
-  # grant (the same Client.InvalidKMSKey.InvalidState gotcha ../cd-server's
-  # KMS key hit -- see its main.tf), and touching a second live module's
-  # key policy for this new module is more blast radius than it's worth.
+  # encryption instead) -- reusing aws_kms_key.airflow above would need
+  # that key's policy extended with an AWSServiceRoleForAutoScaling grant
+  # (the same Client.InvalidKMSKey.InvalidState gotcha ../cd-server's KMS
+  # key hit -- see its main.tf), and that key is shared with the Secrets
+  # Manager secrets above -- touching its policy just for this launch
+  # template's EBS volumes is more blast radius than it's worth.
   block_device_mappings {
     device_name = "/dev/xvda"
 
@@ -367,6 +434,18 @@ resource "aws_launch_template" "airflow" {
   lifecycle {
     create_before_destroy = true
   }
+
+  # user_data's cd_etl_app_db_secret_arn above references the *secret*
+  # (aws_secretsmanager_secret.cd_etl_app_db), not its version -- that
+  # alone doesn't force this launch template (and the ASG/instance it
+  # creates) to wait for the secret's actual *value* to be written.
+  # Explicit depends_on, same reasoning as ../airflow's original
+  # aws_instance.airflow had for the identical race (removed there since
+  # it's now a data source, not owned in the same apply). Only
+  # cd_etl_app_db matters here -- congress_api_key is injected into ECS
+  # tasks via the native `secrets` block, resolved fresh at container
+  # start, never baked into this boot-time template.
+  depends_on = [aws_secretsmanager_secret_version.cd_etl_app_db]
 }
 
 resource "aws_autoscaling_group" "airflow" {
@@ -461,8 +540,8 @@ data "aws_iam_policy_document" "task_execution_secrets" {
     sid     = "ReadAirflowSecrets"
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
-      data.terraform_remote_state.airflow.outputs.congress_api_key_secret_arn,
-      data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn,
+      aws_secretsmanager_secret.congress_api_key.arn,
+      aws_secretsmanager_secret.cd_etl_app_db.arn,
       aws_secretsmanager_secret.airflow_conn_congressional_postgres.arn,
       aws_secretsmanager_secret.airflow_metadata_sql_alchemy_conn.arn,
       aws_secretsmanager_secret.airflow_admin_password.arn,
@@ -474,8 +553,8 @@ data "aws_iam_policy_document" "task_execution_secrets" {
     sid     = "DecryptAirflowSecrets"
     actions = ["kms:Decrypt"]
     resources = [
-      data.terraform_remote_state.airflow.outputs.airflow_kms_key_arn,
-      data.terraform_remote_state.airflow.outputs.airflow_kms_alias_arn,
+      aws_kms_key.airflow.arn,
+      aws_kms_alias.airflow.arn,
     ]
   }
 }
@@ -600,7 +679,7 @@ resource "aws_ecs_task_definition" "scheduler" {
         local.airflow_metadata_conn_secret,
         local.airflow_jwt_secret_env,
         { name = "AIRFLOW_CONN_CONGRESSIONAL_POSTGRES", valueFrom = aws_secretsmanager_secret.airflow_conn_congressional_postgres.arn },
-        { name = "CONGRESS_API_KEY", valueFrom = data.terraform_remote_state.airflow.outputs.congress_api_key_secret_arn },
+        { name = "CONGRESS_API_KEY", valueFrom = aws_secretsmanager_secret.congress_api_key.arn },
       ]
 
       logConfiguration = {
@@ -798,8 +877,8 @@ resource "aws_ecs_task_definition" "migrate" {
 
       secrets = [
         local.airflow_metadata_conn_secret,
-        { name = "PGUSER", valueFrom = "${data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn}:username::" },
-        { name = "PGPASSWORD", valueFrom = "${data.terraform_remote_state.airflow.outputs.cd_etl_app_db_secret_arn}:password::" },
+        { name = "PGUSER", valueFrom = "${aws_secretsmanager_secret.cd_etl_app_db.arn}:username::" },
+        { name = "PGPASSWORD", valueFrom = "${aws_secretsmanager_secret.cd_etl_app_db.arn}:password::" },
         { name = "AIRFLOW_ADMIN_PASSWORD", valueFrom = aws_secretsmanager_secret.airflow_admin_password.arn },
       ]
 

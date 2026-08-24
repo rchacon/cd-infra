@@ -26,6 +26,15 @@ variable "github_repository_owner" {
   default     = "rchacon"
 }
 
+# Moved from ../airflow/variables.tf (cd-infra#42) alongside the
+# congress_api_key secret it feeds -- get one at
+# https://api.congress.gov/sign-up/.
+variable "congress_api_key" {
+  description = "API key for api.congress.gov, stored in Secrets Manager and fetched by the ECS instance at boot."
+  type        = string
+  sensitive   = true
+}
+
 # Same defaults as ../airflow/variables.tf's identical variables -- this
 # module's launch template ports the same idempotent RDS bootstrap
 # (airflow_metadata db + this role), so the values must match exactly or
