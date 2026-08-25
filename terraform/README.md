@@ -177,8 +177,9 @@ region  = "us-west-2"
 encrypt = true
 EOF
 cat > terraform.tfvars <<EOF
-state_bucket_name = "<state_bucket_name from bootstrap output>"
-congress_api_key  = "<your api.congress.gov key>"
+state_bucket_name        = "<state_bucket_name from bootstrap output>"
+congress_api_key         = "<your api.congress.gov key>"
+github_oidc_provider_arn = "<github_oidc_provider_arn from bootstrap output>"
 EOF
 
 terraform init -backend-config=backend.hcl
@@ -186,8 +187,20 @@ terraform plan
 terraform apply
 ```
 
-**Running the one-shot migration task** -- do this once right after the
-first `apply`, and again after any future `cd-etl` release:
+**GitHub OIDC deploy role** (`airflow_deploy`, output as `airflow_deploy_role_arn`) -- what
+`cd-platform`'s `cd-etl-deploy.yml` assumes (`cd-platform#78`/`#80`) to run the
+migrate task below and force-redeploy all 4 services on every `cd-etl-v*`
+release, mirroring `../cd-server/`'s `cd_server_deploy` role but with a
+wider permission set (`ecs:RunTask`/`DescribeTasks` on the migrate task,
+`iam:PassRole` for its execution/task roles, plus
+`ecs:UpdateService`/`DescribeServices` on all 4 services). The role name
+(`cd-platform-airflow-deploy`) is load-bearing -- that workflow hardcodes
+this exact ARN.
+
+**Running the one-shot migration task manually** -- needed once right
+after the first `apply` (ongoing releases run this automatically via
+`cd-etl-deploy.yml` above, per the `airflow_deploy` role); useful by hand
+for debugging or a from-scratch bootstrap:
 
 ```bash
 aws ecs run-task \
@@ -243,12 +256,12 @@ for the actual error and adjust the URL/config key in `main.tf`'s
 `local.execution_api_server_url` accordingly -- same "real errors over
 guessing" approach that resolved `cd-server`'s IAM gaps.
 
-**Deploy automation isn't wired up yet** -- same gap as `cd-server`
-(`cd-platform#71`): `cd-etl-deploy.yml` only builds and pushes to GHCR
-today. A future `cd-platform` issue should add the migration `run-task`
-+ `aws ecs update-service --force-new-deployment` (x3, for scheduler/
-triggerer/dag-processor -- api-server too if its image ever changes)
-steps on `cd-etl-v*` tag push.
+**Deploy automation is wired up** (`cd-platform#78`/`#80`, same pattern
+`cd-server` (`cd-platform#71`) already has): `cd-etl-deploy.yml` builds
+and pushes to GHCR, then assumes the `airflow_deploy` role above to run
+the migration task and force-redeploy all 4 services -- a failed
+migration stops the workflow before any service redeploys against a
+stale schema.
 
 ## `cd-api/` -- Lambda + API Gateway
 
