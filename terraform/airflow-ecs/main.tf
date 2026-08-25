@@ -1040,3 +1040,112 @@ resource "aws_ecs_service" "api_server" {
     Project = "cd-platform"
   }
 }
+
+# --- GitHub OIDC deploy role ---------------------------------------------
+#
+# What `cd-platform`'s cd-etl-deploy.yml assumes (cd-platform#78/#80) to
+# run the migrate task and force-redeploy the 4 services above after every
+# cd-etl-v* release -- same pattern as ../cd-server/main.tf's
+# cd_server_deploy, but a wider permission set since this workflow does
+# two things (run a one-shot migration task, then redeploy) instead of
+# cd_server_deploy's single ecs:UpdateService. Role name
+# (cd-platform-airflow-deploy) is load-bearing: cd-platform#80's workflow
+# already hardcodes this exact ARN as a placeholder (cd-infra#43).
+data "aws_caller_identity" "current" {}
+
+data "aws_iam_policy_document" "airflow_deploy_assume_role" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [var.github_oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.github_repository_owner}@${var.github_owner_id}/cd-platform@${var.github_repo_id}:ref:refs/tags/cd-etl-v*"]
+    }
+  }
+}
+
+resource "aws_iam_role" "airflow_deploy" {
+  name               = "cd-platform-airflow-deploy"
+  assume_role_policy = data.aws_iam_policy_document.airflow_deploy_assume_role.json
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+data "aws_iam_policy_document" "airflow_deploy_permissions" {
+  # Task-definition ARN uses the family wildcard (:*), not
+  # aws_ecs_task_definition.migrate.arn's pinned revision -- the workflow
+  # must be able to run whichever revision is current at deploy time, not
+  # the one that happened to exist when this policy was last applied.
+  statement {
+    sid       = "RunMigrationTask"
+    actions   = ["ecs:RunTask"]
+    resources = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${aws_ecs_task_definition.migrate.family}:*"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [aws_ecs_cluster.airflow.arn]
+    }
+  }
+
+  # Task IDs aren't known ahead of time -- wildcarded to this cluster's
+  # own task namespace. Needed for `aws ecs wait tasks-stopped` plus
+  # reading the migration container's exit code afterward.
+  statement {
+    sid       = "DescribeMigrationTasks"
+    actions   = ["ecs:DescribeTasks"]
+    resources = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.airflow.name}/*"]
+  }
+
+  # RunTask itself requires PassRole for the roles it hands to the task --
+  # cd_server_deploy never needs this since it only calls UpdateService,
+  # never RunTask.
+  statement {
+    sid     = "PassMigrateTaskRoles"
+    actions = ["iam:PassRole"]
+    resources = [
+      aws_iam_role.task_execution.arn,
+      aws_iam_role.task.arn,
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid = "RedeployAirflowServices"
+    actions = [
+      "ecs:UpdateService",
+      "ecs:DescribeServices",
+    ]
+    resources = [
+      aws_ecs_service.scheduler.id,
+      aws_ecs_service.triggerer.id,
+      aws_ecs_service.dag_processor.id,
+      aws_ecs_service.api_server.id,
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "airflow_deploy" {
+  name   = "cd-platform-airflow-deploy"
+  role   = aws_iam_role.airflow_deploy.id
+  policy = data.aws_iam_policy_document.airflow_deploy_permissions.json
+}

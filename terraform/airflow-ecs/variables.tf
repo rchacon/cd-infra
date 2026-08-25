@@ -26,6 +26,31 @@ variable "github_repository_owner" {
   default     = "rchacon"
 }
 
+# ../bootstrap has no S3 backend at all (it's what creates the state
+# bucket), so this can't be read via terraform_remote_state like
+# state_bucket_name above -- copy the literal value from ../bootstrap's
+# github_oidc_provider_arn output into a gitignored terraform.tfvars. Same
+# pattern as ../cd-server/variables.tf's identical variable.
+variable "github_oidc_provider_arn" {
+  description = "ARN of the GitHub Actions OIDC provider (../bootstrap's github_oidc_provider_arn output), used by airflow_deploy's IAM role trust policy."
+  type        = string
+}
+
+# Same values ../cd-server/variables.tf already hardcodes as defaults --
+# same repo (cd-platform), so the same immutable OIDC sub-claim IDs apply
+# here too (see that file's comment for where these came from).
+variable "github_owner_id" {
+  description = "rchacon's numeric GitHub user ID, part of cd-platform's immutable OIDC sub claim."
+  type        = string
+  default     = "2160525"
+}
+
+variable "github_repo_id" {
+  description = "cd-platform's numeric GitHub repository ID, part of its immutable OIDC sub claim."
+  type        = string
+  default     = "1309136464"
+}
+
 # Moved from ../airflow/variables.tf (cd-infra#42) alongside the
 # congress_api_key secret it feeds -- get one at
 # https://api.congress.gov/sign-up/.
