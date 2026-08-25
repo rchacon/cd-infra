@@ -1086,14 +1086,15 @@ resource "aws_iam_role" "airflow_deploy" {
 }
 
 data "aws_iam_policy_document" "airflow_deploy_permissions" {
-  # Task-definition ARN uses the family wildcard (:*), not
-  # aws_ecs_task_definition.migrate.arn's pinned revision -- the workflow
-  # must be able to run whichever revision is current at deploy time, not
-  # the one that happened to exist when this policy was last applied.
+  # arn_without_revision (the family, sans a pinned :N) + ":*" -- the
+  # workflow must be able to run whichever revision is current at deploy
+  # time, not the one that happened to exist when this policy was last
+  # applied. Provider-native attribute, rather than manually rebuilding
+  # the ARN from var.aws_region/account_id/family.
   statement {
     sid       = "RunMigrationTask"
     actions   = ["ecs:RunTask"]
-    resources = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${aws_ecs_task_definition.migrate.family}:*"]
+    resources = ["${aws_ecs_task_definition.migrate.arn_without_revision}:*"]
 
     condition {
       test     = "ArnEquals"
@@ -1102,9 +1103,14 @@ data "aws_iam_policy_document" "airflow_deploy_permissions" {
     }
   }
 
-  # Task IDs aren't known ahead of time -- wildcarded to this cluster's
-  # own task namespace. Needed for `aws ecs wait tasks-stopped` plus
-  # reading the migration container's exit code afterward.
+  # Task ARNs (task/<cluster>/<task-id>) don't encode which task
+  # definition family started them, and task IDs aren't known ahead of
+  # RunTask -- there's no narrower Resource than this cluster's whole task
+  # namespace, so this also covers DescribeTasks on the other 4 services'
+  # tasks. Low-severity (read-only, no secret values exposed by
+  # DescribeTasks) and a hard ECS IAM limitation, not an oversight. Needed
+  # for `aws ecs wait tasks-stopped` plus reading the migration
+  # container's exit code afterward.
   statement {
     sid       = "DescribeMigrationTasks"
     actions   = ["ecs:DescribeTasks"]
