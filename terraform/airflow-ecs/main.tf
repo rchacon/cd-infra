@@ -597,6 +597,26 @@ resource "aws_iam_role_policy" "task_exec_permissions" {
   policy = data.aws_iam_policy_document.task_exec_permissions.json
 }
 
+# Bedrock embedding generation -- cd-platform#9 (semantic search over bill
+# subjects). bills_common.sync_bill() calls Titan Text Embeddings V2
+# directly via boto3 (IAM/task-role auth, no API key/secret to manage),
+# picked over OpenAI/Cohere specifically to avoid provisioning a new
+# external secret. Foundation-model ARNs are account-agnostic (no
+# data.aws_caller_identity needed), region-scoped only.
+data "aws_iam_policy_document" "task_bedrock_permissions" {
+  statement {
+    sid       = "InvokeTitanEmbeddings"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/amazon.titan-embed-text-v2:0"]
+  }
+}
+
+resource "aws_iam_role_policy" "task_bedrock_permissions" {
+  name   = "cd-platform-airflow-ecs-task-bedrock"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_bedrock_permissions.json
+}
+
 # --- Logs ----------------------------------------------------------------
 
 resource "aws_cloudwatch_log_group" "airflow_ecs" {
