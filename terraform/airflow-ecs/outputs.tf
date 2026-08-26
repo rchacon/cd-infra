@@ -32,3 +32,8 @@ output "log_group_name" {
   description = "CloudWatch log group all 5 task definitions ship to (distinguished by awslogs-stream-prefix per component)."
   value       = aws_cloudwatch_log_group.airflow_ecs.name
 }
+
+output "airflow_deploy_role_arn" {
+  description = "ARN of the GitHub OIDC deploy role -- what cd-platform's cd-etl-deploy.yml assumes (cd-platform#78/#80) to run the migrate task and force-redeploy the 4 services on every cd-etl-v* release."
+  value       = aws_iam_role.airflow_deploy.arn
+}
