@@ -263,6 +263,24 @@ the migration task and force-redeploy all 4 services -- a failed
 migration stops the workflow before any service redeploys against a
 stale schema.
 
+**Postgres extensions a migration needs (`CREATE EXTENSION`) must be
+pre-created by the RDS master user, not `cd_etl_app`** (`cd-infra#56`) --
+RDS Postgres restricts `CREATE EXTENSION` to a role holding
+`rds_superuser`, which `cd_etl_app` deliberately lacks, so a migration
+that runs it directly (as `cd-etl-v0.4.0`'s `0005_pgvector_...` migration
+did, for pgvector's `vector` extension) fails with "permission denied to
+create extension", caught by the migrate-task-gates-redeploy design above
+before any service ran the new image. `vector` is now pre-created
+idempotently in `templates/user-data.sh.tftpl` against `cd_platform`, so
+migrations that only *use* it never hit this. If a future migration needs
+a *different* new extension: add it to `user-data.sh.tftpl` the same way
+if it's likely to recur, or run it once manually as the master user (same
+`aws ssm send-command` pattern as `cd-api/`'s manual bootstrap below) if
+it's a one-off -- either way, this only takes effect for a *future* EC2
+instance replacement, not the currently-running instance, so an
+already-failed deploy still needs the one-time manual run before its
+migrate task can be re-run.
+
 ## `cd-api/` -- Lambda + API Gateway
 
 Runs `cd-platform/cd-api` (a FastAPI app, already Lambda-ready via
