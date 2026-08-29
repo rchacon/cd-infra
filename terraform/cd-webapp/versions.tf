@@ -3,8 +3,18 @@ terraform {
 
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+      source = "hashicorp/aws"
+      # ~> 6.0 (not the ~> 5.0 every other root here still uses): the
+      # aws_cognito_managed_login_branding resource cd-infra#31 adds can't
+      # be read reliably on a user pool with more than one app client --
+      # which this module's pool has (cd-webapp-prod + cd-webapp-dev, #29)
+      # -- until provider v6.13.0's fix for
+      # hashicorp/terraform-provider-aws#44188. ~> 6.0 floats to the
+      # current 6.x, well past that. No 5.x -> 6.x breaking changes touch
+      # any resource in this module (Cognito/ACM/Amplify are all
+      # unaffected per the v6 upgrade guide; the new per-resource `region`
+      # attribute is optional and backward-compatible).
+      version = "~> 6.0"
     }
     cloudflare = {
       source  = "cloudflare/cloudflare"
