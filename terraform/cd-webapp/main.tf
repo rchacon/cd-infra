@@ -316,21 +316,12 @@ resource "aws_cognito_managed_login_branding" "cd_webapp" {
     componentClasses = {
       buttons = { borderRadius = 8.0 }
       divider = { lightMode = { borderColor = "ebebf0ff" } }
-      dropDown = {
-        borderRadius = 8.0
-        lightMode = {
-          defaults = { itemBackgroundColor = "ffffffff" }
-          hover = {
-            itemBackgroundColor = "f4f4f4ff"
-            itemBorderColor     = "7d8998ff"
-            itemTextColor       = "0a2246ff"
-          }
-          match = {
-            itemBackgroundColor = "414d5cff"
-            itemTextColor       = "1f5488ff"
-          }
-        }
-      }
+      # borderRadius only -- no lightMode colors. The dropdown (country/
+      # phone typeahead, not used by this email-only sign-in anyway) keeps
+      # Cognito's default palette; an earlier attempt to brand just the
+      # matched-substring text put blue-600 on Cognito's dark-slate
+      # highlight background, ~1.1:1 contrast.
+      dropDown   = { borderRadius = 8.0 }
       focusState = { lightMode = { borderColor = "27619cff" } }
       idpButtons = { icons = { enabled = true } }
       input = {
