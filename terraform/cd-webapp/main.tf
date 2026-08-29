@@ -185,16 +185,18 @@ resource "aws_acm_certificate_validation" "cognito_domain" {
   validation_record_fqdns = [cloudflare_record.cognito_domain_validation.hostname]
 }
 
-# managed_login_version = 1 opts into Managed Login (the newer, brandable
-# hosted UI) rather than 0 (the classic Hosted UI) -- both are available on
-# Essentials, but Managed Login is what was actually asked for and is the
-# non-deprecated path going forward.
+# managed_login_version = 2 is Managed Login (the newer, brandable hosted
+# UI with the branding designer -- see aws_cognito_managed_login_branding
+# below); 1 is the classic Hosted UI. Both are available on Essentials,
+# but Managed Login is what was actually asked for (cd-infra#31) and is
+# the non-deprecated path. NB: an earlier revision of this comment had
+# the values backwards and set 1, which silently served the classic UI.
 resource "aws_cognito_user_pool_domain" "cd_webapp" {
   domain          = var.cognito_domain_name
   certificate_arn = aws_acm_certificate_validation.cognito_domain.certificate_arn
   user_pool_id    = aws_cognito_user_pool.cd_webapp.id
 
-  managed_login_version = 1
+  managed_login_version = 2
 }
 
 # cloudfront_distribution: the domain name of the CloudFront distribution
