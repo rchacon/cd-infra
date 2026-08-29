@@ -205,6 +205,24 @@ resource "aws_vpc_security_group_egress_rule" "lambda_to_rds" {
   referenced_security_group_id = aws_security_group.rds.id
 }
 
+# cd-infra#58: GET /bills/search embeds its query via Bedrock
+# (bedrock-runtime InvokeModel), which the Lambda reaches over the
+# existing NAT route -- the bedrock:InvokeModel IAM grant (../cd-api) is
+# necessary but not sufficient without this network path. Chosen over a
+# Bedrock interface VPC endpoint: the endpoint is a fixed ~$15/mo for two
+# AZs vs. cents of NAT data processing at this traffic level (break-even
+# is ~16M searches/mo). bedrock-runtime has no fixed IP range to scope
+# to, same reasoning as airflow_https's egress rule above.
+resource "aws_vpc_security_group_egress_rule" "lambda_https" {
+  security_group_id = aws_security_group.lambda.id
+  description       = "HTTPS out (Bedrock InvokeModel) via NAT"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+  #trivy:ignore:AWS-0104
+  cidr_ipv4 = "0.0.0.0/0"
+}
+
 # Egress counterpart to lambda_from_lambda's ingress rule above -- egress
 # is evaluated on the traffic's source and ingress on its destination
 # independently, so sharing one SG between Lambda and #4's RDS Proxy
