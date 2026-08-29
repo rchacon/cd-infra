@@ -214,6 +214,230 @@ resource "cloudflare_record" "cognito_domain" {
   proxied = false
 }
 
+# Managed Login branding for auth.civicdog.com (cd-infra#31) -- replaces
+# AWS's unstyled default login/signup/forgot-password pages with
+# cd-webapp's navy/blue brand.
+#
+# for_each over BOTH app clients: Cognito ties a branding style to a
+# (user pool, client) pair, and cd-webapp-dev's local-dev login
+# (http://localhost:5183) should look identical to prod's. The settings
+# document and assets are byte-for-byte identical between the two;
+# Cognito just stores its own copy of the assets per style (~0.5MB each,
+# well under the 1MB-per-asset cap).
+#
+# Requires the provider at >= v6.13.0 -- see versions.tf's comment on why
+# this module (alone) is on hashicorp/aws ~> 6.0. Also requires
+# aws_cognito_user_pool_domain.cd_webapp's managed_login_version = 1
+# (set above).
+resource "aws_cognito_managed_login_branding" "cd_webapp" {
+  for_each = {
+    prod = aws_cognito_user_pool_client.cd_webapp_prod.id
+    dev  = aws_cognito_user_pool_client.cd_webapp_dev.id
+  }
+
+  user_pool_id = aws_cognito_user_pool.cd_webapp.id
+  client_id    = each.value
+
+  # The civicdog wordmark, shown centered above the sign-in form. Source
+  # of truth is cd-webapp's own repo (public/logo/civicdog-logo-transparent.png,
+  # 1200x800 RGBA) -- copied into assets/ here rather than referenced
+  # across repos.
+  asset {
+    category   = "FORM_LOGO"
+    color_mode = "LIGHT"
+    extension  = "PNG"
+    bytes      = filebase64("${path.module}/assets/civicdog-logo-transparent.png")
+  }
+
+  # Browser-tab favicon. Managed Login's FAVICON_* categories only accept
+  # ICO or SVG, so this .ico was generated from cd-webapp's 512x512
+  # public/logo/civicdog-mark.png with:
+  #   python3 -c "from PIL import Image; \
+  #     Image.open('civicdog-mark.png').save( \
+  #       'civicdog-favicon.ico', sizes=[(16,16),(32,32),(48,48),(64,64)])"
+  asset {
+    category   = "FAVICON_ICO"
+    color_mode = "LIGHT"
+    extension  = "ICO"
+    bytes      = filebase64("${path.module}/assets/civicdog-favicon.ico")
+  }
+
+  # A full light-mode style document. Colors are "rrggbbaa" hex (no '#').
+  # cd-webapp is light-only (its index.css sets `color-scheme: light` and
+  # defines no dark palette), so `colorSchemeMode` is LIGHT and every
+  # `darkMode` block is deliberately omitted -- Cognito keeps its own
+  # defaults for anything not specified here.
+  #
+  # Brand tokens, from cd-webapp/src/index.css's @theme block (itself
+  # mirrored from cd-website):
+  #   navy-900 #0a2246 -> 0a2246ff  headings, input labels, primary-button
+  #                                 hover/active, link hover, IdP-button
+  #                                 hover/active border+text
+  #   navy-800 #123159 -> 123159ff  body / description text
+  #   blue-600 #1f5488 -> 1f5488ff  primary-button bg, links, secondary-
+  #                                 button border+text, selected control
+  #   blue-500 #27619c -> 27619cff  focus ring
+  # Neutral greys and the semantic status/alert colors (error/success/
+  # warning) are left at AWS's Cloudscape defaults -- they aren't brand
+  # colors.
+  settings = jsonencode({
+    categories = {
+      auth = {
+        authMethodOrder = [[
+          { display = "BUTTON", type = "FEDERATED" },
+          { display = "INPUT", type = "USERNAME_PASSWORD" },
+        ]]
+        federation = {
+          interfaceStyle = "BUTTON_LIST"
+          order          = []
+        }
+      }
+      # displayGraphics = false: no decorative side illustration -- matches
+      # cd-webapp's flat-white aesthetic. Form centered on the page.
+      form = {
+        displayGraphics     = false
+        instructions        = { enabled = false }
+        languageSelector    = { enabled = false }
+        location            = { horizontal = "CENTER", vertical = "CENTER" }
+        sessionTimerDisplay = "NONE"
+      }
+      # No page header/footer chrome -- the login card sits on plain white.
+      global = {
+        colorSchemeMode = "LIGHT"
+        pageFooter      = { enabled = false }
+        pageHeader      = { enabled = false }
+        spacingDensity  = "REGULAR"
+      }
+      signUp = {
+        acceptanceElements = [{ enforcement = "NONE", textKey = "en" }]
+      }
+    }
+
+    componentClasses = {
+      buttons = { borderRadius = 8.0 }
+      divider = { lightMode = { borderColor = "ebebf0ff" } }
+      dropDown = {
+        borderRadius = 8.0
+        lightMode = {
+          defaults = { itemBackgroundColor = "ffffffff" }
+          hover = {
+            itemBackgroundColor = "f4f4f4ff"
+            itemBorderColor     = "7d8998ff"
+            itemTextColor       = "0a2246ff"
+          }
+          match = {
+            itemBackgroundColor = "414d5cff"
+            itemTextColor       = "1f5488ff"
+          }
+        }
+      }
+      focusState = { lightMode = { borderColor = "27619cff" } }
+      idpButtons = { icons = { enabled = true } }
+      input = {
+        borderRadius = 8.0
+        lightMode = {
+          defaults         = { backgroundColor = "ffffffff", borderColor = "7d8998ff" }
+          placeholderColor = "5f6b7aff"
+        }
+      }
+      inputDescription = { lightMode = { textColor = "5f6b7aff" } }
+      inputLabel       = { lightMode = { textColor = "0a2246ff" } }
+      link = {
+        lightMode = {
+          defaults = { textColor = "1f5488ff" }
+          hover    = { textColor = "0a2246ff" }
+        }
+      }
+      optionControls = {
+        lightMode = {
+          defaults = { backgroundColor = "ffffffff", borderColor = "7d8998ff" }
+          selected = { backgroundColor = "1f5488ff", foregroundColor = "ffffffff" }
+        }
+      }
+      # Semantic status colors -- AWS defaults, not brand.
+      statusIndicator = {
+        lightMode = {
+          error   = { backgroundColor = "fff7f7ff", borderColor = "d91515ff", indicatorColor = "d91515ff" }
+          pending = { indicatorColor = "AAAAAAAA" }
+          success = { backgroundColor = "f2fcf3ff", borderColor = "037f0cff", indicatorColor = "037f0cff" }
+          warning = { backgroundColor = "fffce9ff", borderColor = "8d6605ff", indicatorColor = "8d6605ff" }
+        }
+      }
+    }
+
+    components = {
+      alert = {
+        borderRadius = 12.0
+        lightMode    = { error = { backgroundColor = "fff7f7ff", borderColor = "d91515ff" } }
+      }
+      # Only an .ico asset is shipped.
+      favicon = { enabledTypes = ["ICO"] }
+      form = {
+        backgroundImage = { enabled = false }
+        borderRadius    = 8.0
+        lightMode       = { backgroundColor = "ffffffff", borderColor = "c6c6cdff" }
+        # Turns on the FORM_LOGO asset above.
+        logo = {
+          enabled       = true
+          formInclusion = "IN"
+          location      = "CENTER"
+          position      = "TOP"
+        }
+      }
+      idpButton = {
+        custom = {}
+        standard = {
+          lightMode = {
+            active   = { backgroundColor = "d3e7f9ff", borderColor = "0a2246ff", textColor = "0a2246ff" }
+            defaults = { backgroundColor = "ffffffff", borderColor = "424650ff", textColor = "424650ff" }
+            hover    = { backgroundColor = "f2f8fdff", borderColor = "0a2246ff", textColor = "0a2246ff" }
+          }
+        }
+      }
+      # No page-background image asset -- plain white.
+      pageBackground = {
+        image     = { enabled = false }
+        lightMode = { color = "ffffffff" }
+      }
+      # Header/footer are disabled at the category level above; these keep
+      # AWS's defaults so the document round-trips cleanly.
+      pageFooter = {
+        backgroundImage = { enabled = false }
+        lightMode       = { background = { color = "fafafaff" }, borderColor = "d5dbdbff" }
+        logo            = { enabled = false, location = "START" }
+      }
+      pageHeader = {
+        backgroundImage = { enabled = false }
+        lightMode       = { background = { color = "fafafaff" }, borderColor = "d5dbdbff" }
+        logo            = { enabled = false, location = "START" }
+      }
+      pageText = {
+        lightMode = {
+          bodyColor        = "123159ff"
+          descriptionColor = "123159ff"
+          headingColor     = "0a2246ff"
+        }
+      }
+      phoneNumberSelector = { displayType = "TEXT" }
+      primaryButton = {
+        lightMode = {
+          active   = { backgroundColor = "0a2246ff", textColor = "ffffffff" }
+          defaults = { backgroundColor = "1f5488ff", textColor = "ffffffff" }
+          disabled = { backgroundColor = "ffffffff", borderColor = "ffffffff" }
+          hover    = { backgroundColor = "0a2246ff", textColor = "ffffffff" }
+        }
+      }
+      secondaryButton = {
+        lightMode = {
+          active   = { backgroundColor = "d3e7f9ff", borderColor = "0a2246ff", textColor = "0a2246ff" }
+          defaults = { backgroundColor = "ffffffff", borderColor = "1f5488ff", textColor = "1f5488ff" }
+          hover    = { backgroundColor = "f2f8fdff", borderColor = "0a2246ff", textColor = "0a2246ff" }
+        }
+      }
+    }
+  })
+}
+
 # --- Amplify: cd-webapp's React frontend ----------------------------------
 #
 # A dedicated, non-monorepo repo -- unlike ../amplify/'s two cd-website

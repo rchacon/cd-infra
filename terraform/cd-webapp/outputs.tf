@@ -44,3 +44,8 @@ output "cognito_domain_url" {
   description = "Cognito Managed Login's custom domain URL -- the /login, /signup, /oauth2/authorize etc. endpoints customers get redirected to."
   value       = "https://${var.cognito_domain_name}"
 }
+
+output "cognito_managed_login_branding_ids" {
+  description = "Managed Login branding style IDs, keyed by client (prod/dev) -- for `aws cognito-idp describe-managed-login-branding --user-pool-id ... --managed-login-branding-id ...`."
+  value       = { for k, v in aws_cognito_managed_login_branding.cd_webapp : k => v.managed_login_branding_id }
+}
