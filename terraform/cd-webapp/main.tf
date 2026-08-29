@@ -226,7 +226,7 @@ resource "cloudflare_record" "cognito_domain" {
 # well under the 1MB-per-asset cap).
 #
 # Requires the provider at >= v6.13.0 -- see versions.tf's comment on why
-# this module (alone) is on hashicorp/aws ~> 6.0. Also requires
+# this module (alone) is on hashicorp/aws ~> 6.13. Also requires
 # aws_cognito_user_pool_domain.cd_webapp's managed_login_version = 1
 # (set above).
 resource "aws_cognito_managed_login_branding" "cd_webapp" {
