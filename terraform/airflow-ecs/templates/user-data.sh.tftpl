@@ -57,4 +57,16 @@ GRANT ALL PRIVILEGES ON DATABASE "$db" TO "${cd_etl_db_username}";
 GRANT ALL ON SCHEMA public TO "${cd_etl_db_username}";
 SQL
 done
+
+# CREATE EXTENSION is one of the few statements RDS Postgres restricts to
+# rds_superuser, which cd_etl_app deliberately lacks -- cd-infra#56 hit
+# this when migration 0005 tried to create pgvector's `vector` extension
+# as cd_etl_app and failed with "permission denied to create extension".
+# Pre-creating it here, as the master user, means future migrations that
+# merely USE the extension (rather than create it) never hit this again.
+# Natively idempotent (unlike CREATE DATABASE above), no \gexec trick
+# needed. cd_platform only -- airflow_metadata has no use for pgvector.
+psql -h ${rds_address} -U "$RDS_USER" -d cd_platform -v ON_ERROR_STOP=1 <<-SQL
+CREATE EXTENSION IF NOT EXISTS vector;
+SQL
 unset PGPASSWORD
