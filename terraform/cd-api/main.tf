@@ -240,6 +240,26 @@ resource "aws_iam_role_policy" "lambda_kms" {
   policy = data.aws_iam_policy_document.lambda_kms.json
 }
 
+# Bedrock embedding generation -- cd-platform#9 (semantic search over
+# bills). GET /bills/search embeds the caller's free-text query via
+# Titan Text Embeddings V2 directly via boto3 (IAM/role auth, no API
+# key/secret to manage). Mirrors airflow-ecs/main.tf's
+# task_bedrock_permissions grant for cd-etl's own task role -- same
+# model, same account-agnostic/region-scoped-only foundation-model ARN.
+data "aws_iam_policy_document" "lambda_bedrock_permissions" {
+  statement {
+    sid       = "InvokeTitanEmbeddings"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/amazon.titan-embed-text-v2:0"]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_bedrock_permissions" {
+  name   = "cd-platform-cd-api-lambda-bedrock"
+  role   = aws_iam_role.lambda.id
+  policy = data.aws_iam_policy_document.lambda_bedrock_permissions.json
+}
+
 resource "aws_lambda_function" "cd_api" {
   function_name = "cd-platform-cd-api"
   role          = aws_iam_role.lambda.arn
