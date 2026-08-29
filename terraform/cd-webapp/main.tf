@@ -185,16 +185,18 @@ resource "aws_acm_certificate_validation" "cognito_domain" {
   validation_record_fqdns = [cloudflare_record.cognito_domain_validation.hostname]
 }
 
-# managed_login_version = 1 opts into Managed Login (the newer, brandable
-# hosted UI) rather than 0 (the classic Hosted UI) -- both are available on
-# Essentials, but Managed Login is what was actually asked for and is the
-# non-deprecated path going forward.
+# managed_login_version = 2 is Managed Login (the newer, brandable hosted
+# UI with the branding designer -- see aws_cognito_managed_login_branding
+# below); 1 is the classic Hosted UI. Both are available on Essentials,
+# but Managed Login is what was actually asked for (cd-infra#31) and is
+# the non-deprecated path. NB: an earlier revision of this comment had
+# the values backwards and set 1, which silently served the classic UI.
 resource "aws_cognito_user_pool_domain" "cd_webapp" {
   domain          = var.cognito_domain_name
   certificate_arn = aws_acm_certificate_validation.cognito_domain.certificate_arn
   user_pool_id    = aws_cognito_user_pool.cd_webapp.id
 
-  managed_login_version = 1
+  managed_login_version = 2
 }
 
 # cloudfront_distribution: the domain name of the CloudFront distribution
@@ -212,6 +214,221 @@ resource "cloudflare_record" "cognito_domain" {
   # this repo (already backed by CloudFront; stacking Cloudflare's proxy on
   # top is two CDNs for no benefit and risks breaking domain verification).
   proxied = false
+}
+
+# Managed Login branding for auth.civicdog.com (cd-infra#31) -- replaces
+# AWS's unstyled default login/signup/forgot-password pages with
+# cd-webapp's navy/blue brand.
+#
+# for_each over BOTH app clients: Cognito ties a branding style to a
+# (user pool, client) pair, and cd-webapp-dev's local-dev login
+# (http://localhost:5183) should look identical to prod's. The settings
+# document and assets are byte-for-byte identical between the two;
+# Cognito just stores its own copy of the assets per style (~0.5MB each,
+# well under the 1MB-per-asset cap).
+#
+# Requires the provider at >= v6.13.0 -- see versions.tf's comment on why
+# this module (alone) is on hashicorp/aws ~> 6.13. Also requires Managed
+# Login to be enabled on the pool (aws_cognito_user_pool_domain.cd_webapp's
+# managed_login_version = 1) before CreateManagedLoginBranding will
+# succeed -- nothing in this resource's arguments references that domain,
+# so the ordering is pinned with an explicit depends_on below.
+resource "aws_cognito_managed_login_branding" "cd_webapp" {
+  for_each = {
+    prod = aws_cognito_user_pool_client.cd_webapp_prod.id
+    dev  = aws_cognito_user_pool_client.cd_webapp_dev.id
+  }
+
+  user_pool_id = aws_cognito_user_pool.cd_webapp.id
+  client_id    = each.value
+
+  depends_on = [aws_cognito_user_pool_domain.cd_webapp]
+
+  # The civicdog wordmark, shown centered above the sign-in form. Source
+  # of truth is cd-webapp's own repo (public/logo/civicdog-logo-transparent.png,
+  # 1200x800 RGBA) -- copied into assets/ here rather than referenced
+  # across repos.
+  asset {
+    category   = "FORM_LOGO"
+    color_mode = "LIGHT"
+    extension  = "PNG"
+    bytes      = filebase64("${path.module}/assets/civicdog-logo-transparent.png")
+  }
+
+  # Browser-tab favicon. Managed Login's FAVICON_* categories only accept
+  # ICO or SVG, so this .ico was generated from cd-webapp's 512x512
+  # public/logo/civicdog-mark.png with:
+  #   python3 -c "from PIL import Image; \
+  #     Image.open('civicdog-mark.png').save( \
+  #       'civicdog-favicon.ico', sizes=[(16,16),(32,32),(48,48),(64,64)])"
+  asset {
+    category   = "FAVICON_ICO"
+    color_mode = "LIGHT"
+    extension  = "ICO"
+    bytes      = filebase64("${path.module}/assets/civicdog-favicon.ico")
+  }
+
+  # A full light-mode style document. Colors are "rrggbbaa" hex (no '#').
+  # cd-webapp is light-only (its index.css sets `color-scheme: light` and
+  # defines no dark palette), so `colorSchemeMode` is LIGHT and every
+  # `darkMode` block is deliberately omitted -- Cognito keeps its own
+  # defaults for anything not specified here.
+  #
+  # Brand tokens, from cd-webapp/src/index.css's @theme block (itself
+  # mirrored from cd-website):
+  #   navy-900 #0a2246 -> 0a2246ff  headings, input labels, primary-button
+  #                                 hover/active, link hover, IdP-button
+  #                                 hover/active border+text
+  #   navy-800 #123159 -> 123159ff  body / description text
+  #   blue-600 #1f5488 -> 1f5488ff  primary-button bg, links, secondary-
+  #                                 button border+text, selected control
+  #   blue-500 #27619c -> 27619cff  focus ring
+  # Neutral greys and the semantic status/alert colors (error/success/
+  # warning) are left at AWS's Cloudscape defaults -- they aren't brand
+  # colors.
+  settings = jsonencode({
+    categories = {
+      # No `auth` block: both clients are supported_identity_providers =
+      # ["COGNITO"] with no external IdPs, so there's no federation order
+      # to express. Letting Cognito default it avoids an empty federation
+      # divider above the username/password form (and a possible plan
+      # diff from Cognito rewriting the order on read).
+      #
+      # displayGraphics = false: no decorative side illustration -- matches
+      # cd-webapp's flat-white aesthetic. Form centered on the page.
+      form = {
+        displayGraphics     = false
+        instructions        = { enabled = false }
+        languageSelector    = { enabled = false }
+        location            = { horizontal = "CENTER", vertical = "CENTER" }
+        sessionTimerDisplay = "NONE"
+      }
+      # No page header/footer chrome -- the login card sits on plain white.
+      global = {
+        colorSchemeMode = "LIGHT"
+        pageFooter      = { enabled = false }
+        pageHeader      = { enabled = false }
+        spacingDensity  = "REGULAR"
+      }
+      signUp = {
+        acceptanceElements = [{ enforcement = "NONE", textKey = "en" }]
+      }
+    }
+
+    componentClasses = {
+      buttons = { borderRadius = 8.0 }
+      divider = { lightMode = { borderColor = "ebebf0ff" } }
+      # borderRadius only -- no lightMode colors. The dropdown (country/
+      # phone typeahead, not used by this email-only sign-in anyway) keeps
+      # Cognito's default palette; an earlier attempt to brand just the
+      # matched-substring text put blue-600 on Cognito's dark-slate
+      # highlight background, ~1.1:1 contrast.
+      dropDown   = { borderRadius = 8.0 }
+      focusState = { lightMode = { borderColor = "27619cff" } }
+      idpButtons = { icons = { enabled = true } }
+      input = {
+        borderRadius = 8.0
+        lightMode = {
+          defaults         = { backgroundColor = "ffffffff", borderColor = "7d8998ff" }
+          placeholderColor = "5f6b7aff"
+        }
+      }
+      inputDescription = { lightMode = { textColor = "5f6b7aff" } }
+      inputLabel       = { lightMode = { textColor = "0a2246ff" } }
+      link = {
+        lightMode = {
+          defaults = { textColor = "1f5488ff" }
+          hover    = { textColor = "0a2246ff" }
+        }
+      }
+      optionControls = {
+        lightMode = {
+          defaults = { backgroundColor = "ffffffff", borderColor = "7d8998ff" }
+          selected = { backgroundColor = "1f5488ff", foregroundColor = "ffffffff" }
+        }
+      }
+      # No statusIndicator block: its colors are all semantic (error /
+      # success / warning / pending), not brand, so Cognito's defaults are
+      # what we want. The fixture this document was seeded from carried a
+      # "AAAAAAAA" placeholder for pending.indicatorColor, which would
+      # both render wrong and never round-trip (Cognito lowercases hex).
+    }
+
+    components = {
+      alert = {
+        borderRadius = 12.0
+        lightMode    = { error = { backgroundColor = "fff7f7ff", borderColor = "d91515ff" } }
+      }
+      # Only an .ico asset is shipped.
+      favicon = { enabledTypes = ["ICO"] }
+      form = {
+        backgroundImage = { enabled = false }
+        borderRadius    = 8.0
+        lightMode       = { backgroundColor = "ffffffff", borderColor = "c6c6cdff" }
+        # Turns on the FORM_LOGO asset above.
+        logo = {
+          enabled       = true
+          formInclusion = "IN"
+          location      = "CENTER"
+          position      = "TOP"
+        }
+      }
+      idpButton = {
+        custom = {}
+        standard = {
+          lightMode = {
+            active   = { backgroundColor = "d3e7f9ff", borderColor = "0a2246ff", textColor = "0a2246ff" }
+            defaults = { backgroundColor = "ffffffff", borderColor = "424650ff", textColor = "424650ff" }
+            hover    = { backgroundColor = "f2f8fdff", borderColor = "0a2246ff", textColor = "0a2246ff" }
+          }
+        }
+      }
+      # No page-background image asset -- plain white.
+      pageBackground = {
+        image     = { enabled = false }
+        lightMode = { color = "ffffffff" }
+      }
+      # Header/footer are disabled at the category level above; these keep
+      # AWS's defaults so the document round-trips cleanly.
+      pageFooter = {
+        backgroundImage = { enabled = false }
+        lightMode       = { background = { color = "fafafaff" }, borderColor = "d5dbdbff" }
+        logo            = { enabled = false, location = "START" }
+      }
+      pageHeader = {
+        backgroundImage = { enabled = false }
+        lightMode       = { background = { color = "fafafaff" }, borderColor = "d5dbdbff" }
+        logo            = { enabled = false, location = "START" }
+      }
+      pageText = {
+        lightMode = {
+          bodyColor        = "123159ff"
+          descriptionColor = "123159ff"
+          headingColor     = "0a2246ff"
+        }
+      }
+      phoneNumberSelector = { displayType = "TEXT" }
+      primaryButton = {
+        lightMode = {
+          active   = { backgroundColor = "0a2246ff", textColor = "ffffffff" }
+          defaults = { backgroundColor = "1f5488ff", textColor = "ffffffff" }
+          # Cloudscape's disabled-button grey, not the fixture's
+          # white-on-white -- the form background is also #ffffff, so a
+          # white disabled button (e.g. before required fields are filled)
+          # would vanish into the card.
+          disabled = { backgroundColor = "e9ebedff", borderColor = "e9ebedff" }
+          hover    = { backgroundColor = "0a2246ff", textColor = "ffffffff" }
+        }
+      }
+      secondaryButton = {
+        lightMode = {
+          active   = { backgroundColor = "d3e7f9ff", borderColor = "0a2246ff", textColor = "0a2246ff" }
+          defaults = { backgroundColor = "ffffffff", borderColor = "1f5488ff", textColor = "1f5488ff" }
+          hover    = { backgroundColor = "f2f8fdff", borderColor = "0a2246ff", textColor = "0a2246ff" }
+        }
+      }
+    }
+  })
 }
 
 # --- Amplify: cd-webapp's React frontend ----------------------------------
