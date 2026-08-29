@@ -286,16 +286,12 @@ resource "aws_cognito_managed_login_branding" "cd_webapp" {
   # colors.
   settings = jsonencode({
     categories = {
-      auth = {
-        authMethodOrder = [[
-          { display = "BUTTON", type = "FEDERATED" },
-          { display = "INPUT", type = "USERNAME_PASSWORD" },
-        ]]
-        federation = {
-          interfaceStyle = "BUTTON_LIST"
-          order          = []
-        }
-      }
+      # No `auth` block: both clients are supported_identity_providers =
+      # ["COGNITO"] with no external IdPs, so there's no federation order
+      # to express. Letting Cognito default it avoids an empty federation
+      # divider above the username/password form (and a possible plan
+      # diff from Cognito rewriting the order on read).
+      #
       # displayGraphics = false: no decorative side illustration -- matches
       # cd-webapp's flat-white aesthetic. Form centered on the page.
       form = {
