@@ -345,15 +345,11 @@ resource "aws_cognito_managed_login_branding" "cd_webapp" {
           selected = { backgroundColor = "1f5488ff", foregroundColor = "ffffffff" }
         }
       }
-      # Semantic status colors -- AWS defaults, not brand.
-      statusIndicator = {
-        lightMode = {
-          error   = { backgroundColor = "fff7f7ff", borderColor = "d91515ff", indicatorColor = "d91515ff" }
-          pending = { indicatorColor = "AAAAAAAA" }
-          success = { backgroundColor = "f2fcf3ff", borderColor = "037f0cff", indicatorColor = "037f0cff" }
-          warning = { backgroundColor = "fffce9ff", borderColor = "8d6605ff", indicatorColor = "8d6605ff" }
-        }
-      }
+      # No statusIndicator block: its colors are all semantic (error /
+      # success / warning / pending), not brand, so Cognito's defaults are
+      # what we want. The fixture this document was seeded from carried a
+      # "AAAAAAAA" placeholder for pending.indicatorColor, which would
+      # both render wrong and never round-trip (Cognito lowercases hex).
     }
 
     components = {
