@@ -226,9 +226,11 @@ resource "cloudflare_record" "cognito_domain" {
 # well under the 1MB-per-asset cap).
 #
 # Requires the provider at >= v6.13.0 -- see versions.tf's comment on why
-# this module (alone) is on hashicorp/aws ~> 6.13. Also requires
-# aws_cognito_user_pool_domain.cd_webapp's managed_login_version = 1
-# (set above).
+# this module (alone) is on hashicorp/aws ~> 6.13. Also requires Managed
+# Login to be enabled on the pool (aws_cognito_user_pool_domain.cd_webapp's
+# managed_login_version = 1) before CreateManagedLoginBranding will
+# succeed -- nothing in this resource's arguments references that domain,
+# so the ordering is pinned with an explicit depends_on below.
 resource "aws_cognito_managed_login_branding" "cd_webapp" {
   for_each = {
     prod = aws_cognito_user_pool_client.cd_webapp_prod.id
@@ -237,6 +239,8 @@ resource "aws_cognito_managed_login_branding" "cd_webapp" {
 
   user_pool_id = aws_cognito_user_pool.cd_webapp.id
   client_id    = each.value
+
+  depends_on = [aws_cognito_user_pool_domain.cd_webapp]
 
   # The civicdog wordmark, shown centered above the sign-in form. Source
   # of truth is cd-webapp's own repo (public/logo/civicdog-logo-transparent.png,
