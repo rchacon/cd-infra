@@ -410,7 +410,11 @@ resource "aws_cognito_managed_login_branding" "cd_webapp" {
         lightMode = {
           active   = { backgroundColor = "0a2246ff", textColor = "ffffffff" }
           defaults = { backgroundColor = "1f5488ff", textColor = "ffffffff" }
-          disabled = { backgroundColor = "ffffffff", borderColor = "ffffffff" }
+          # Cloudscape's disabled-button grey, not the fixture's
+          # white-on-white -- the form background is also #ffffff, so a
+          # white disabled button (e.g. before required fields are filled)
+          # would vanish into the card.
+          disabled = { backgroundColor = "e9ebedff", borderColor = "e9ebedff" }
           hover    = { backgroundColor = "0a2246ff", textColor = "ffffffff" }
         }
       }
