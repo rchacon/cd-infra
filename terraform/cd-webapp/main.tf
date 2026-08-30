@@ -59,14 +59,23 @@ resource "aws_cognito_user_pool" "cd_webapp" {
   }
 
   # DEVELOPER = send via our own SES identity (below) rather than the
-  # shared COGNITO_DEFAULT domain. Adding/removing this block is an
-  # in-place update, not a pool replacement. Email *content* stays
-  # Cognito's built-in plain-text template -- visual branding would need a
-  # CustomEmailSender Lambda, out of scope for cd-infra#30.
-  email_configuration {
-    email_sending_account = "DEVELOPER"
-    from_email_address    = var.cognito_from_email_address
-    source_arn            = aws_sesv2_email_identity.cognito.arn
+  # shared COGNITO_DEFAULT domain. Gated on enable_cognito_ses_sending
+  # (default false) so the rollout is a tfvars flip, not a code edit:
+  # `apply` with it false creates the SES identity + DNS and leaves the
+  # pool on COGNITO_DEFAULT; once `aws sesv2 get-email-identity` reports
+  # the identity verified, set it true and `apply` again. Cognito rejects
+  # source_arn for an unverified identity, so flipping the pool in the
+  # same run that first creates the identity would fail mid-apply.
+  # Toggling the flag is an in-place pool update, never a replacement.
+  # Email *content* stays Cognito's plain-text template -- visual branding
+  # would need a CustomEmailSender Lambda, out of scope for cd-infra#30.
+  dynamic "email_configuration" {
+    for_each = var.enable_cognito_ses_sending ? [1] : []
+    content {
+      email_sending_account = "DEVELOPER"
+      from_email_address    = coalesce(var.cognito_from_email_address, "CivicDog <noreply@${var.domain_name}>")
+      source_arn            = aws_sesv2_email_identity.cognito.arn
+    }
   }
 
   tags = {

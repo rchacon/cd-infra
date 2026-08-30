@@ -71,12 +71,24 @@ variable "cognito_domain_name" {
   default     = "auth.civicdog.com"
 }
 
-# The From: header on Cognito's verification / forgot-password emails once
-# they send through SES (cd-infra#30) instead of COGNITO_DEFAULT. The
-# display-name form is allowed by Cognito; the address's domain must match
-# the SES identity below (var.domain_name).
+# Second pass of the SES rollout (cd-infra#30): false creates the SES
+# identity + its DNS records but leaves the pool on COGNITO_DEFAULT; flip
+# to true only once `aws sesv2 get-email-identity --email-identity
+# <domain_name>` reports the identity verified. Same "stopgap flag"
+# shape as ../cd-api/'s static API key. Toggling it is an in-place pool
+# update.
+variable "enable_cognito_ses_sending" {
+  description = "Route Cognito's verification / forgot-password emails through the SES identity (from_email_address) instead of COGNITO_DEFAULT. Flip to true only after the SES identity has verified."
+  type        = bool
+  default     = false
+}
+
+# From: header on those emails. null -> "CivicDog <noreply@<domain_name>>"
+# so the address domain always tracks the SES identity (var.domain_name).
+# Override only for a different display name or local-part; the address's
+# domain must stay equal to var.domain_name or Cognito rejects it.
 variable "cognito_from_email_address" {
-  description = "From: header for Cognito emails sent via SES. Display-name form (\"Name <addr>\") is allowed."
+  description = "From: header for Cognito emails sent via SES. Display-name form (\"Name <addr>\") is allowed. null derives it from var.domain_name."
   type        = string
-  default     = "CivicDog <noreply@civicdog.com>"
+  default     = null
 }

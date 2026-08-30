@@ -708,17 +708,15 @@ to pre-verified addresses. AWS Console -> SES -> "Account dashboard" ->
 Amplify GitHub-App authorization above.
 
 **Apply in two passes**, same reasoning as the `amplify/` DNS caution --
-it touches the live `civicdog.com` zone, email included:
+it touches the live `civicdog.com` zone, email included. The
+`enable_cognito_ses_sending` variable (default `false`) is the gate, so
+this is a `terraform.tfvars` flip, not a code edit:
 
-1. Apply the SES identity, MAIL FROM, and the six `cloudflare_record`s
-   **without** the pool's `email_configuration` block -- comment that block
-   out, or
-   `terraform apply -target=aws_sesv2_email_identity.cognito
-   -target=aws_sesv2_email_identity_mail_from_attributes.cognito
-   -target=cloudflare_record.ses_dkim
-   -target=cloudflare_record.ses_mail_from_mx
-   -target=cloudflare_record.ses_mail_from_spf -target=cloudflare_record.dmarc`.
-   Wait for verification (DNS propagation is minutes-to-hours):
+1. With `enable_cognito_ses_sending = false` (the default), `terraform
+   apply`. This creates the SES identity, MAIL FROM, and the six
+   `cloudflare_record`s; the pool stays on `COGNITO_DEFAULT` (its
+   `email_configuration` block isn't rendered). Wait for verification
+   (DNS propagation is minutes-to-hours):
 
    ```bash
    aws sesv2 get-email-identity --email-identity civicdog.com \
@@ -726,9 +724,10 @@ it touches the live `civicdog.com` zone, email included:
    # want: verified=true, dkim=SUCCESS, mailfrom=SUCCESS
    ```
 
-2. Once that's `SUCCESS` **and** production access is granted, apply the
-   `email_configuration` block. `terraform plan` must show only
-   `aws_cognito_user_pool.cd_webapp` updating **in place** (0 to destroy).
+2. Once that's `SUCCESS` **and** production access is granted, set
+   `enable_cognito_ses_sending = true` in `terraform.tfvars` and `apply`
+   again. `terraform plan` must show only `aws_cognito_user_pool.cd_webapp`
+   updating **in place** (0 to destroy).
 
 **Mandatory post-apply tests** (not optional -- same rigor as `amplify/`'s
 email test):
@@ -746,11 +745,11 @@ email test):
 
 **Rollback** -- reversible in independent layers:
 
-- *Level 0 (instant, no DNS):* delete the `email_configuration` block and
-  `terraform apply` (~30s, one in-place change). Every subsequent email
-  reverts to `COGNITO_DEFAULT`. This is the real undo.
-- *Level 1:* revert Cognito, leave the SES identity + DNS records in place
-  -- inert with nothing sending through them.
+- *Level 0 (instant, no DNS):* set `enable_cognito_ses_sending = false`
+  and `terraform apply` (~30s, one in-place change). Every subsequent
+  email reverts to `COGNITO_DEFAULT`. This is the real undo.
+- *Level 1:* keep the flag `false`, leave the SES identity + DNS records
+  in place -- inert with nothing sending through them.
 - *Level 2:* `terraform destroy -target` the SES identity, MAIL FROM, and
   the six `cloudflare_record`s. All additive records; Google's set is
   untouched.
