@@ -257,6 +257,15 @@ resource "cloudflare_record" "ses_mail_from_spf" {
 # deliverability for all civicdog.com mail, not just Cognito's. `rua`
 # aggregate reporting is deliberately omitted -- no mailbox to receive it
 # yet; add `rua=mailto:...` and consider p=quarantine once there's data.
+#
+# COUPLED to aws_sesv2_email_identity_mail_from_attributes'
+# behavior_on_mx_failure below: it's USE_DEFAULT_VALUE (send via
+# amazonses.com, SPF unaligned) rather than REJECT_MESSAGE, chosen so a
+# broken mail.civicdog.com MX degrades auth-email delivery instead of
+# dropping login/verification mail outright. That trade only holds while
+# this is p=none (DKIM alignment still carries DMARC). Before tightening
+# to p=quarantine/reject, revisit behavior_on_mx_failure -- otherwise a
+# MAIL FROM regression could silently quarantine verification email.
 resource "cloudflare_record" "dmarc" {
   zone_id = var.cloudflare_zone_id
   name    = "_dmarc"
