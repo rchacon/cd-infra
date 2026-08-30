@@ -189,6 +189,13 @@ resource "aws_cognito_user_pool_client" "cd_webapp_dev" {
 
 # Easy DKIM (AWS-managed key). Identity verification for a SESv2 domain is
 # satisfied by the three DKIM CNAMEs alone -- no separate _amazonses TXT.
+#
+# Region: the default provider, i.e. var.aws_region (us-west-2). Cognito
+# only accepts a source_arn whose SES identity is in a Cognito-supported
+# email region, and the pool's region maps to a specific one -- us-west-2
+# is supported and is the pool's own region, so this is fine as-is. If
+# var.aws_region ever changes, re-check Cognito's "Email settings for
+# Amazon Cognito user pools" region table before assuming this still works.
 resource "aws_sesv2_email_identity" "cognito" {
   email_identity = var.domain_name
 
