@@ -70,3 +70,13 @@ variable "cognito_domain_name" {
   type        = string
   default     = "auth.civicdog.com"
 }
+
+# The From: header on Cognito's verification / forgot-password emails once
+# they send through SES (cd-infra#30) instead of COGNITO_DEFAULT. The
+# display-name form is allowed by Cognito; the address's domain must match
+# the SES identity below (var.domain_name).
+variable "cognito_from_email_address" {
+  description = "From: header for Cognito emails sent via SES. Display-name form (\"Name <addr>\") is allowed."
+  type        = string
+  default     = "CivicDog <noreply@civicdog.com>"
+}
