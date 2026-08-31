@@ -688,6 +688,79 @@ exists and returns its CloudFront distribution hostname -- confirm the
 exact computed attribute name (`cloudfront_distribution` as written here)
 against the installed `aws` provider version at plan time.
 
+### SES verification emails (#30)
+
+The Cognito pool sends verification / forgot-password mail through an SES
+domain identity on `civicdog.com` (`from_email_address =
+noreply@civicdog.com`) instead of the shared `COGNITO_DEFAULT` domain,
+which had no reputation tied to us and was landing verification mail in
+spam. The SES resources and their six Cloudflare records
+(`aws_sesv2_email_identity.cognito`,
+`aws_sesv2_email_identity_mail_from_attributes.cognito`, `ses_dkim[0-2]`,
+`ses_mail_from_mx`, `ses_mail_from_spf`, `dmarc`) are all **additive** --
+nothing edits the apex `TXT`/`MX` that Google Workspace uses (the apex has
+no `v=spf1` or `_dmarc` record today, so there's nothing to merge into).
+
+**One manual, one-time step Terraform can't do:** request **SES
+production access**. New accounts run in the SES sandbox and can only send
+to pre-verified addresses. AWS Console -> SES -> "Account dashboard" ->
+"Request production access" (or a Support case). Same category as the
+Amplify GitHub-App authorization above.
+
+**Apply in two passes**, same reasoning as the `amplify/` DNS caution --
+it touches the live `civicdog.com` zone, email included. The
+`enable_cognito_ses_sending` variable (default `false`) is the gate, so
+this is a `terraform.tfvars` flip, not a code edit:
+
+1. With `enable_cognito_ses_sending = false` (the default), `terraform
+   apply`. This creates the SES identity, MAIL FROM, and the six
+   `cloudflare_record`s; the pool stays on `COGNITO_DEFAULT` (its
+   `email_configuration` block isn't rendered). Wait for verification
+   (DNS propagation is minutes-to-hours):
+
+   ```bash
+   aws sesv2 get-email-identity --email-identity civicdog.com \
+     --query '{verified:VerifiedForSendingStatus, dkim:DkimAttributes.Status, mailfrom:MailFromAttributes.MailFromDomainStatus}'
+   # want: verified=true, dkim=SUCCESS, mailfrom=SUCCESS
+   ```
+
+2. Once that's `SUCCESS` **and** production access is granted, set
+   `enable_cognito_ses_sending = true` in `terraform.tfvars` and `apply`
+   again. `terraform plan` must show only `aws_cognito_user_pool.cd_webapp`
+   updating **in place** (0 to destroy).
+
+**Mandatory post-apply tests** (not optional -- same rigor as `amplify/`'s
+email test):
+
+1. Do a fresh Cognito self-signup with a real external address. The
+   verification email must arrive **from `noreply@civicdog.com`, in the
+   inbox, not spam**. Check the raw headers for `dkim=pass`
+   (`d=civicdog.com`), `spf=pass` (`mail.civicdog.com`), `dmarc=pass`.
+   (While still in the SES sandbox, the recipient address must itself be
+   SES-verified for this test.)
+2. Send an ordinary email **to and from** a `@civicdog.com` Google
+   Workspace mailbox and confirm it's unaffected -- the apex `MX`/DKIM
+   were never touched and `_dmarc` is `p=none` (monitor-only, no
+   enforcement).
+
+**Rollback** -- reversible in independent layers:
+
+- *Level 0 (instant, no DNS):* set `enable_cognito_ses_sending = false`
+  and `terraform apply` (~30s, one in-place change). Every subsequent
+  email reverts to `COGNITO_DEFAULT`. This is the real undo.
+- *Level 1:* keep the flag `false`, leave the SES identity + DNS records
+  in place -- inert with nothing sending through them.
+- *Level 2:* `terraform destroy -target` the SES identity, MAIL FROM, and
+  the six `cloudflare_record`s. All additive records; Google's set is
+  untouched.
+
+No apex pre-image capture is needed since no apex record is ever edited.
+For the record, the apex `TXT` set is currently the single string
+`google-site-verification=jGrx7-zm5YUv2I43sMWgaXFDkopJOnPElQd61M1jVVc`.
+
+Email *content* stays Cognito's built-in plain-text template -- visual
+branding would need a `CustomEmailSender` Lambda, out of scope for #30.
+
 ## `cd-server/` -- ECS (EC2) + ALB
 
 `cd-server` (`rchacon/cd-platform`, FastAPI + Strawberry GraphQL backing

@@ -49,3 +49,13 @@ output "cognito_managed_login_branding_ids" {
   description = "Managed Login branding style IDs, keyed by client (prod/dev) -- for `aws cognito-idp describe-managed-login-branding --user-pool-id ... --managed-login-branding-id ...`."
   value       = { for k, v in aws_cognito_managed_login_branding.cd_webapp : k => v.managed_login_branding_id }
 }
+
+output "ses_cognito_identity_arn" {
+  description = "ARN of the SES domain identity Cognito sends verification emails through (cd-infra#30) -- the pool's email_configuration.source_arn."
+  value       = aws_sesv2_email_identity.cognito.arn
+}
+
+output "ses_cognito_dkim_status" {
+  description = "Easy-DKIM verification status for the SES identity -- expect SUCCESS once the 3 DKIM CNAMEs propagate. `aws sesv2 get-email-identity --email-identity civicdog.com` has the full detail (incl. MAIL FROM status)."
+  value       = aws_sesv2_email_identity.cognito.dkim_signing_attributes[0].status
+}

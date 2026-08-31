@@ -22,11 +22,10 @@ moved {
 #
 # Email as the sign-in identifier (not a separate username) -- simplest
 # model for a customer-facing portal where there's no reason to have both.
-# Auto-verifies email via Cognito's own built-in ("COGNITO_DEFAULT") email
-# sending -- fine for this stage's volume, but that path has a low daily
-# send quota not meant for real production traffic; move to SES before
-# meaningful signup volume, same kind of MVP-stopgap flag as ../cd-api/'s
-# static API key.
+# Verification / forgot-password emails send through SES as
+# noreply@civicdog.com (email_configuration below, cd-infra#30) rather than
+# Cognito's shared COGNITO_DEFAULT domain -- the latter had no reputation
+# tied to us and was landing verification mail in spam.
 resource "aws_cognito_user_pool" "cd_webapp" {
   name = "cd-platform-cd-webapp"
 
@@ -56,6 +55,26 @@ resource "aws_cognito_user_pool" "cd_webapp" {
     recovery_mechanism {
       name     = "verified_email"
       priority = 1
+    }
+  }
+
+  # DEVELOPER = send via our own SES identity (below) rather than the
+  # shared COGNITO_DEFAULT domain. Gated on enable_cognito_ses_sending
+  # (default false) so the rollout is a tfvars flip, not a code edit:
+  # `apply` with it false creates the SES identity + DNS and leaves the
+  # pool on COGNITO_DEFAULT; once `aws sesv2 get-email-identity` reports
+  # the identity verified, set it true and `apply` again. Cognito rejects
+  # source_arn for an unverified identity, so flipping the pool in the
+  # same run that first creates the identity would fail mid-apply.
+  # Toggling the flag is an in-place pool update, never a replacement.
+  # Email *content* stays Cognito's plain-text template -- visual branding
+  # would need a CustomEmailSender Lambda, out of scope for cd-infra#30.
+  dynamic "email_configuration" {
+    for_each = var.enable_cognito_ses_sending ? [1] : []
+    content {
+      email_sending_account = "DEVELOPER"
+      from_email_address    = coalesce(var.cognito_from_email_address, "CivicDog <noreply@${var.domain_name}>")
+      source_arn            = aws_sesv2_email_identity.cognito.arn
     }
   }
 
@@ -153,6 +172,115 @@ resource "aws_cognito_user_pool_client" "cd_webapp_dev" {
     refresh_token = "days"
   }
 }
+
+# --- SES: sending domain for Cognito's verification emails (cd-infra#30) --
+#
+# Every DNS record below is a NEW, additive record under civicdog.com --
+# nothing here edits the apex TXT/MX that Google Workspace relies on. The
+# apex has no v=spf1 or _dmarc record today, so the SPF concern in #30
+# (merging into a shared record) doesn't apply. SES's DKIM selectors are
+# unique tokens and can't collide with Google's `google._domainkey`.
+#
+# TWO manual, out-of-band steps this can't do (see terraform/README.md):
+#   1. Request SES production access -- new accounts are sandboxed and can
+#      only send to pre-verified addresses.
+#   2. Apply in two passes: this SES identity + its DNS first, wait for
+#      DKIM/MAIL-FROM to verify, THEN the pool's email_configuration.
+
+# Easy DKIM (AWS-managed key). Identity verification for a SESv2 domain is
+# satisfied by the three DKIM CNAMEs alone -- no separate _amazonses TXT.
+#
+# Region: the default provider, i.e. var.aws_region (us-west-2). Cognito
+# only accepts a source_arn whose SES identity is in a Cognito-supported
+# email region, and the pool's region maps to a specific one -- us-west-2
+# is supported and is the pool's own region, so this is fine as-is. If
+# var.aws_region ever changes, re-check Cognito's "Email settings for
+# Amazon Cognito user pools" region table before assuming this still works.
+resource "aws_sesv2_email_identity" "cognito" {
+  email_identity = var.domain_name
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+# Custom MAIL FROM on a subdomain -> the envelope-sender (Return-Path) is
+# under civicdog.com, so SPF authenticates against a record WE own and
+# aligns with the From: domain. Kept on `mail.` so the SPF TXT and MX live
+# on the subdomain and never touch the apex. USE_DEFAULT_VALUE: if the
+# subdomain MX ever fails to resolve, SES silently falls back to its own
+# amazonses.com MAIL FROM rather than dropping the message.
+resource "aws_sesv2_email_identity_mail_from_attributes" "cognito" {
+  email_identity         = aws_sesv2_email_identity.cognito.email_identity
+  mail_from_domain       = "mail.${var.domain_name}"
+  behavior_on_mx_failure = "USE_DEFAULT_VALUE"
+}
+
+# 3x DKIM CNAME: <token>._domainkey.civicdog.com -> <token>.dkim.amazonses.com.
+# count, not for_each: SES Easy DKIM always returns exactly three tokens,
+# and they're unknown until the identity is created -- for_each can't take
+# not-yet-known values as keys.
+resource "cloudflare_record" "ses_dkim" {
+  count = 3
+
+  zone_id = var.cloudflare_zone_id
+  name    = "${aws_sesv2_email_identity.cognito.dkim_signing_attributes[0].tokens[count.index]}._domainkey"
+  type    = "CNAME"
+  content = "${aws_sesv2_email_identity.cognito.dkim_signing_attributes[0].tokens[count.index]}.dkim.amazonses.com"
+  ttl     = 300
+  proxied = false
+}
+
+# MAIL FROM subdomain: MX for SES bounce/complaint handling ...
+resource "cloudflare_record" "ses_mail_from_mx" {
+  zone_id  = var.cloudflare_zone_id
+  name     = "mail"
+  type     = "MX"
+  content  = "feedback-smtp.${var.aws_region}.amazonses.com"
+  priority = 10
+  ttl      = 300
+  proxied  = false
+}
+
+# ... and its SPF, authorising SES to send for mail.civicdog.com. Scoped
+# to the subdomain -- the apex keeps having no SPF record (unchanged).
+resource "cloudflare_record" "ses_mail_from_spf" {
+  zone_id = var.cloudflare_zone_id
+  name    = "mail"
+  type    = "TXT"
+  content = "v=spf1 include:amazonses.com ~all"
+  ttl     = 300
+  proxied = false
+}
+
+# DMARC, monitor-only. Additive (no _dmarc record exists today) and helps
+# deliverability for all civicdog.com mail, not just Cognito's. `rua`
+# aggregate reporting is deliberately omitted -- no mailbox to receive it
+# yet; add `rua=mailto:...` and consider p=quarantine once there's data.
+#
+# COUPLED to aws_sesv2_email_identity_mail_from_attributes'
+# behavior_on_mx_failure below: it's USE_DEFAULT_VALUE (send via
+# amazonses.com, SPF unaligned) rather than REJECT_MESSAGE, chosen so a
+# broken mail.civicdog.com MX degrades auth-email delivery instead of
+# dropping login/verification mail outright. That trade only holds while
+# this is p=none (DKIM alignment still carries DMARC). Before tightening
+# to p=quarantine/reject, revisit behavior_on_mx_failure -- otherwise a
+# MAIL FROM regression could silently quarantine verification email.
+resource "cloudflare_record" "dmarc" {
+  zone_id = var.cloudflare_zone_id
+  name    = "_dmarc"
+  type    = "TXT"
+  content = "v=DMARC1; p=none;"
+  ttl     = 300
+  proxied = false
+}
+
+# NB: no aws_sesv2_email_identity_policy here. That's a cross-account
+# sending-authorization grant; for same-account Cognito DEVELOPER sending
+# it isn't needed. Add one (principal email.cognito-idp.amazonaws.com,
+# ses:SendEmail/SendRawEmail on this identity, conditioned on
+# aws:SourceArn = the pool ARN) only if the post-apply email test fails
+# with an authorization error.
 
 # --- Cognito Managed Login: auth.civicdog.com -----------------------------
 
