@@ -541,6 +541,54 @@ resource "aws_iam_role_policy" "task_permissions" {
 # wrong Cognito endpoint if they were ever deployed to different regions.
 locals {
   cognito_region = split(":", data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_arn)[3]
+
+  # Shared by the long-running service task and the one-shot migrate task
+  # (cd-infra#67) so the two never drift on image/env/secrets/logging.
+  cd_server_image = "ghcr.io/${var.github_repository_owner}/cd-server:latest"
+
+  # CD_SERVER_ENVIRONMENT anything other than "local" picks LambdaApiClient
+  # over HttpApiClient (see cd-server/src/cd/server/settings.py) --
+  # CD_API_BASE_URL is irrelevant in that mode. GRAPHIQL_ENABLED is
+  # deliberately unset -- already off by default in the production image
+  # (app.py/schema.py), unlike docker-compose.yml's dev service.
+  #
+  # cd-infra#48: PGHOST/PGPORT/PGDATABASE plus COGNITO_USER_POOL_ID/
+  # COGNITO_REGION/COGNITO_CLIENT_IDS -- all required by settings.py's
+  # get_users_service() for any ENVIRONMENT other than "local", where
+  # their absence is a fail-fast RuntimeError at import. COGNITO_REGION is
+  # local.cognito_region, derived from cd-webapp's own User Pool ARN
+  # rather than assumed equal to var.aws_region. COGNITO_CLIENT_IDS is
+  # comma-joined (settings.py's own parsing) from both cd-webapp App
+  # Clients sharing the one User Pool, since a token minted by either must
+  # verify here. None are secret -- only PGUSER/PGPASSWORD go through the
+  # `secrets` block below.
+  cd_server_environment = [
+    { name = "CD_SERVER_ENVIRONMENT", value = "production" },
+    { name = "CD_API_FUNCTION_NAME", value = data.aws_lambda_function.cd_api.function_name },
+    { name = "PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
+    { name = "PGPORT", value = "5432" },
+    { name = "PGDATABASE", value = var.cd_customers_db_name },
+    { name = "COGNITO_USER_POOL_ID", value = data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_id },
+    { name = "COGNITO_REGION", value = local.cognito_region },
+    {
+      name = "COGNITO_CLIENT_IDS"
+      value = join(",", [
+        data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_client_id,
+        data.terraform_remote_state.cd_webapp.outputs.cognito_dev_client_id,
+      ])
+    },
+  ]
+
+  cd_server_secrets = [
+    { name = "PGUSER", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:username::" },
+    { name = "PGPASSWORD", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:password::" },
+  ]
+
+  # Per-task-def `awslogs-stream-prefix` is merged in at the use site.
+  cd_server_log_options = {
+    "awslogs-group"  = aws_cloudwatch_log_group.cd_server.name
+    "awslogs-region" = var.aws_region
+  }
 }
 
 # bridge networking (not awsvpc) -- avoids per-task ENI cost/churn, same
@@ -559,10 +607,21 @@ resource "aws_ecs_task_definition" "cd_server" {
   container_definitions = jsonencode([
     {
       name      = "cd-server"
-      image     = "ghcr.io/${var.github_repository_owner}/cd-server:latest"
+      image     = local.cd_server_image
       essential = true
       memory    = var.container_memory
 
+      # CD_SERVER_MIGRATE_TASK=1 (in `environment` below, cd-platform#133):
+      # entrypoint.sh sees it, skips the on-boot `alembic upgrade head`,
+      # and execs the image's CMD (uvicorn). Migrations are owned solely
+      # by the one-shot cd_server_migrate task below (cd-infra#67), which
+      # is what lets the ECS service move to a surge deployment without
+      # two overlapping app tasks racing migrations. No entryPoint
+      # override: entrypoint.sh does nothing but that conditional migrate
+      # + `exec "$@"`, so the env var alone is sufficient and avoids
+      # duplicating the Dockerfile CMD here. (../airflow-ecs's services
+      # do override entryPoint, but cd-etl's entrypoint.sh does
+      # unconditional setup that has to be bypassed; cd-server's doesn't.)
       portMappings = [
         {
           containerPort = 8000
@@ -571,55 +630,52 @@ resource "aws_ecs_task_definition" "cd_server" {
         }
       ]
 
-      # CD_SERVER_ENVIRONMENT anything other than "local" picks
-      # LambdaApiClient over HttpApiClient (see cd-server/src/cd/server/
-      # settings.py) -- CD_API_BASE_URL is irrelevant in that mode.
-      # GRAPHIQL_ENABLED is deliberately unset -- already off by default
-      # in the production image (app.py/schema.py), unlike
-      # docker-compose.yml's dev service which sets it to "true".
-      #
-      # cd-infra#48: PGHOST/PGPORT/PGDATABASE plus COGNITO_USER_POOL_ID/
-      # COGNITO_REGION/COGNITO_CLIENT_IDS -- both required by
-      # settings.py's get_users_service() for any ENVIRONMENT other than
-      # "local", where their absence is a fail-fast RuntimeError at
-      # import. COGNITO_REGION is local.cognito_region, derived from
-      # cd-webapp's own User Pool ARN (see locals block above) rather
-      # than assumed equal to var.aws_region. COGNITO_CLIENT_IDS is
-      # comma-joined (settings.py's own parsing) from both cd-webapp App
-      # Clients sharing the one User Pool, since a token minted by either
-      # must verify here. None of PGHOST/PGPORT/PGDATABASE/
-      # COGNITO_USER_POOL_ID/COGNITO_REGION/COGNITO_CLIENT_IDS are
-      # secret -- only PGUSER/PGPASSWORD (below) go through the `secrets`
-      # block.
-      environment = [
-        { name = "CD_SERVER_ENVIRONMENT", value = "production" },
-        { name = "CD_API_FUNCTION_NAME", value = data.aws_lambda_function.cd_api.function_name },
-        { name = "PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
-        { name = "PGPORT", value = "5432" },
-        { name = "PGDATABASE", value = var.cd_customers_db_name },
-        { name = "COGNITO_USER_POOL_ID", value = data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_id },
-        { name = "COGNITO_REGION", value = local.cognito_region },
-        {
-          name = "COGNITO_CLIENT_IDS"
-          value = join(",", [
-            data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_client_id,
-            data.terraform_remote_state.cd_webapp.outputs.cognito_dev_client_id,
-          ])
-        },
-      ]
-
-      secrets = [
-        { name = "PGUSER", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:username::" },
-        { name = "PGPASSWORD", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:password::" },
-      ]
+      environment = concat(local.cd_server_environment, [
+        { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
+      ])
+      secrets = local.cd_server_secrets
 
       logConfiguration = {
         logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.cd_server.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "cd-server"
-        }
+        options   = merge(local.cd_server_log_options, { "awslogs-stream-prefix" = "cd-server" })
+      }
+    }
+  ])
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+# One-shot migration task (cd-infra#67). Keeps the image's default
+# ENTRYPOINT ["/entrypoint.sh"] and passes `migrate`, so entrypoint.sh
+# runs `alembic upgrade head` and exits 0. Never a service -- the
+# cd-server-deploy.yml workflow (cd-platform, separate PR) will
+# `aws ecs run-task` this, `wait tasks-stopped`, assert exitCode 0, then
+# `update-service --force-new-deployment`. Mirrors
+# aws_ecs_task_definition.migrate in ../airflow-ecs.
+resource "aws_ecs_task_definition" "cd_server_migrate" {
+  family                   = "cd-platform-cd-server-migrate"
+  network_mode             = "bridge"
+  requires_compatibilities = ["EC2"]
+  execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "migrate"
+      image     = local.cd_server_image
+      essential = true
+      memory    = var.container_memory
+
+      command = ["migrate"]
+
+      environment = local.cd_server_environment
+      secrets     = local.cd_server_secrets
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options   = merge(local.cd_server_log_options, { "awslogs-stream-prefix" = "migrate" })
       }
     }
   ])
@@ -656,6 +712,11 @@ resource "aws_lb_target_group" "cd_server" {
   protocol    = "HTTP"
   vpc_id      = data.terraform_remote_state.networking.outputs.vpc_id
   target_type = "instance"
+
+  # 30s, not the implicit 300 (cd-infra#67): cd-server serves short-lived
+  # GraphQL/REST requests and closes connections cleanly, so a 5-minute
+  # drain of the old task was almost the entire per-deploy 503 window.
+  deregistration_delay = 30
 
   health_check {
     path                = "/health"
@@ -711,36 +772,30 @@ resource "aws_ecs_service" "cd_server" {
   task_definition = aws_ecs_task_definition.cd_server.arn
   desired_count   = var.instance_count
 
-  # cd-infra#48: cd-server's entrypoint.sh runs `alembic upgrade head`
-  # unconditionally on every start, with no dedicated one-shot migrate
-  # task to run it exactly once (unlike ../airflow-ecs's entryPoint-
-  # override pattern) -- there's only ever this one task definition/
-  # service. ECS's own defaults (100/200) start the new task *alongside*
-  # the old one during a rolling deployment, which would race two
-  # concurrent `alembic upgrade head` runs against the same
-  # cd_customers database. 0/100 forces a plain stop-then-start instead,
-  # trading a brief request-serving gap during deploys (unlike
-  # ../airflow-ecs's identical setting, this service does front live
-  # traffic via the ALB) for eliminating that race -- acceptable at this
-  # project's current traffic/deploy-frequency, worth revisiting if
-  # either grows enough to need true zero-downtime deploys (which would
-  # need a real migrate-then-deploy split in cd-platform, not just a
-  # Terraform-side change).
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
+  # Surge / rolling deploy (cd-infra#67): 100/200 keeps the old task
+  # serving until the new one is healthy in the target group, so a
+  # `cd-server-v*` deploy no longer takes server.civicdog.com down for
+  # ~6 min. Safe now that migrations are owned by the one-shot
+  # cd_server_migrate task (above) instead of every app task's
+  # entrypoint -- 0/100 previously existed only to stop two overlapping
+  # app tasks racing `alembic upgrade head` against cd_customers
+  # (cd-platform#133 landed the app-side split: `migrate` subcommand +
+  # CD_SERVER_MIGRATE_TASK opt-out + a pg_advisory_lock backstop).
+  # Pairs with deployment_circuit_breaker below (cd-infra#66): with
+  # minimum 100%, a failed rollout keeps the old task and auto-reverts.
+  # Rolling deploys mean old code briefly runs against the new schema --
+  # migrations must be expand/contract, per cd-server/README.md.
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
 
-  # cd-infra#64: a bad `cd-server-v*` rollout otherwise sits broken
+  # cd-infra#66: a bad `cd-server-v*` rollout otherwise sits broken
   # indefinitely -- the deploy workflow fires `update-service
   # --force-new-deployment` and returns immediately without waiting for
-  # stability, and there's no rollback. The circuit breaker makes ECS
-  # give up after repeated failed task starts and redeploy the last
-  # known-good task definition on its own. Independent of the
-  # still-open question of eliminating the deploy blip itself (needs a
-  # bigger instance + a migrate/deploy split in cd-platform, see the
-  # 0/100 note above); this just bounds the blast radius of a broken
-  # image. With minimum_healthy_percent = 0 a failed deploy still has a
-  # gap before the rollback task is up, but it self-heals instead of
-  # staying down.
+  # stability. The circuit breaker makes ECS give up after repeated
+  # failed task starts and redeploy the last known-good task definition
+  # on its own. Pairs with the 100% minimum above (cd-infra#67): the old
+  # task keeps serving throughout a failed rollout, so the auto-revert is
+  # genuinely zero-downtime, not just self-healing.
   deployment_circuit_breaker {
     enable   = true
     rollback = true
@@ -873,11 +928,59 @@ resource "aws_iam_role" "cd_server_deploy" {
 
 data "aws_iam_policy_document" "cd_server_deploy_permissions" {
   statement {
+    sid = "RedeployCdServerService"
     actions = [
       "ecs:UpdateService",
       "ecs:DescribeServices",
     ]
     resources = [aws_ecs_service.cd_server.id]
+  }
+
+  # cd-infra#67: cd-server-deploy.yml (cd-platform) gains a
+  # migrate-then-deploy step -- run the one-shot cd_server_migrate task,
+  # wait for it to stop, assert exitCode 0, then redeploy. Same three
+  # statements aws_iam_policy_document.airflow_deploy_permissions already
+  # has for cd-platform-airflow-migrate.
+  #
+  # arn_without_revision + ":*" -- the workflow runs whichever revision is
+  # current at deploy time, not the one that existed at `terraform apply`.
+  # Further scoped by an ecs:cluster condition.
+  statement {
+    sid       = "RunMigrationTask"
+    actions   = ["ecs:RunTask"]
+    resources = ["${aws_ecs_task_definition.cd_server_migrate.arn_without_revision}:*"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [aws_ecs_cluster.cd_server.arn]
+    }
+  }
+
+  # Task ARNs don't encode which family started them and task IDs aren't
+  # known before RunTask, so there's no narrower Resource than this
+  # cluster's whole task namespace. Read-only, no secret values exposed.
+  # Needed for `aws ecs wait tasks-stopped` + reading the exit code.
+  statement {
+    sid       = "DescribeMigrationTasks"
+    actions   = ["ecs:DescribeTasks"]
+    resources = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.cd_server.name}/*"]
+  }
+
+  # RunTask requires PassRole for the roles it hands the task.
+  statement {
+    sid     = "PassMigrateTaskRoles"
+    actions = ["iam:PassRole"]
+    resources = [
+      aws_iam_role.task_execution.arn,
+      aws_iam_role.task.arn,
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
   }
 }
 
