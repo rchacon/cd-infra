@@ -825,12 +825,23 @@ current version, or whatever's current) either before or after `apply` --
 **Deploy automation isn't wired up yet.** This directory provisions a
 GitHub OIDC role (`cd_server_deploy`, output as `cd_server_deploy_role_arn`)
 scoped to `ecs:UpdateService`/`ecs:DescribeServices` on this one service,
-but nothing in `cd-platform`'s `cd-server-deploy.yml` assumes it yet --
-unlike Watchtower's GHCR-polling auto-restart on `../airflow`'s plain EC2
-instance, ECS tasks don't self-detect a new `:latest` push. Until that
-workflow step exists, roll out a new image manually:
+but `cd-platform`'s `cd-server-deploy.yml` doesn't yet run the
+migrate-then-deploy sequence it's scoped for (see "Rolling deploys"
+below). ECS tasks don't self-detect a new `:latest` push, so until that
+workflow step lands, roll out a new image manually **-- and because the
+service task no longer runs migrations on start (#67), the migrate task
+has to be run first, or new code hits an un-migrated `cd_customers`**:
 
 ```bash
+# 1. run migrations to completion (skip only if this release has none)
+TASK=$(aws ecs run-task --cluster cd-platform-cd-server --launch-type EC2 \
+  --task-definition cd-platform-cd-server-migrate \
+  --query 'tasks[0].taskArn' --output text)
+aws ecs wait tasks-stopped --cluster cd-platform-cd-server --tasks "$TASK"
+aws ecs describe-tasks --cluster cd-platform-cd-server --tasks "$TASK" \
+  --query 'tasks[0].containers[0].exitCode'   # must be 0
+
+# 2. then redeploy the service
 aws ecs update-service --cluster cd-platform-cd-server \
   --service cd-platform-cd-server --force-new-deployment
 ```
