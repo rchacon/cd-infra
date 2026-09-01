@@ -934,11 +934,59 @@ resource "aws_iam_role" "cd_server_deploy" {
 
 data "aws_iam_policy_document" "cd_server_deploy_permissions" {
   statement {
+    sid = "RedeployCdServerService"
     actions = [
       "ecs:UpdateService",
       "ecs:DescribeServices",
     ]
     resources = [aws_ecs_service.cd_server.id]
+  }
+
+  # cd-infra#67: cd-server-deploy.yml (cd-platform) gains a
+  # migrate-then-deploy step -- run the one-shot cd_server_migrate task,
+  # wait for it to stop, assert exitCode 0, then redeploy. Same three
+  # statements aws_iam_policy_document.airflow_deploy_permissions already
+  # has for cd-platform-airflow-migrate.
+  #
+  # arn_without_revision + ":*" -- the workflow runs whichever revision is
+  # current at deploy time, not the one that existed at `terraform apply`.
+  # Further scoped by an ecs:cluster condition.
+  statement {
+    sid       = "RunMigrationTask"
+    actions   = ["ecs:RunTask"]
+    resources = ["${aws_ecs_task_definition.cd_server_migrate.arn_without_revision}:*"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [aws_ecs_cluster.cd_server.arn]
+    }
+  }
+
+  # Task ARNs don't encode which family started them and task IDs aren't
+  # known before RunTask, so there's no narrower Resource than this
+  # cluster's whole task namespace. Read-only, no secret values exposed.
+  # Needed for `aws ecs wait tasks-stopped` + reading the exit code.
+  statement {
+    sid       = "DescribeMigrationTasks"
+    actions   = ["ecs:DescribeTasks"]
+    resources = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.cd_server.name}/*"]
+  }
+
+  # RunTask requires PassRole for the roles it hands the task.
+  statement {
+    sid     = "PassMigrateTaskRoles"
+    actions = ["iam:PassRole"]
+    resources = [
+      aws_iam_role.task_execution.arn,
+      aws_iam_role.task.arn,
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
   }
 }
 
