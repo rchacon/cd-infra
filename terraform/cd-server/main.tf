@@ -718,6 +718,11 @@ resource "aws_lb_target_group" "cd_server" {
   vpc_id      = data.terraform_remote_state.networking.outputs.vpc_id
   target_type = "instance"
 
+  # 30s, not the implicit 300 (cd-infra#67): cd-server serves short-lived
+  # GraphQL/REST requests and closes connections cleanly, so a 5-minute
+  # drain of the old task was almost the entire per-deploy 503 window.
+  deregistration_delay = 30
+
   health_check {
     path                = "/health"
     matcher             = "200"
@@ -772,23 +777,21 @@ resource "aws_ecs_service" "cd_server" {
   task_definition = aws_ecs_task_definition.cd_server.arn
   desired_count   = var.instance_count
 
-  # cd-infra#48: cd-server's entrypoint.sh runs `alembic upgrade head`
-  # unconditionally on every start, with no dedicated one-shot migrate
-  # task to run it exactly once (unlike ../airflow-ecs's entryPoint-
-  # override pattern) -- there's only ever this one task definition/
-  # service. ECS's own defaults (100/200) start the new task *alongside*
-  # the old one during a rolling deployment, which would race two
-  # concurrent `alembic upgrade head` runs against the same
-  # cd_customers database. 0/100 forces a plain stop-then-start instead,
-  # trading a brief request-serving gap during deploys (unlike
-  # ../airflow-ecs's identical setting, this service does front live
-  # traffic via the ALB) for eliminating that race -- acceptable at this
-  # project's current traffic/deploy-frequency, worth revisiting if
-  # either grows enough to need true zero-downtime deploys (which would
-  # need a real migrate-then-deploy split in cd-platform, not just a
-  # Terraform-side change).
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
+  # Surge / rolling deploy (cd-infra#67): 100/200 keeps the old task
+  # serving until the new one is healthy in the target group, so a
+  # `cd-server-v*` deploy no longer takes server.civicdog.com down for
+  # ~6 min. Safe now that migrations are owned by the one-shot
+  # cd_server_migrate task (above) instead of every app task's
+  # entrypoint -- 0/100 previously existed only to stop two overlapping
+  # app tasks racing `alembic upgrade head` against cd_customers
+  # (cd-platform#133 landed the app-side split: `migrate` subcommand +
+  # CD_SERVER_MIGRATE_TASK opt-out + a pg_advisory_lock backstop).
+  # Pairs with deployment_circuit_breaker below (cd-infra#66): with
+  # minimum 100%, a failed rollout keeps the old task and auto-reverts.
+  # Rolling deploys mean old code briefly runs against the new schema --
+  # migrations must be expand/contract, per cd-server/README.md.
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
 
   # cd-infra#64: a bad `cd-server-v*` rollout otherwise sits broken
   # indefinitely -- the deploy workflow fires `update-service

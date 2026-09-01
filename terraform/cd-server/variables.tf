@@ -67,9 +67,9 @@ variable "server_domain_name" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type for the ECS cluster's container instance(s). t3.micro by default -- cd-server is a thin FastAPI app with no DB yet, much lighter than ../airflow's multi-process workload that justified t3.small there."
+  description = "EC2 instance type for the ECS cluster's container instance(s). t3.small (cd-infra#67): a surge deploy briefly runs two 400 MiB service tasks plus (during a release) a 400 MiB one-shot migrate task, alongside the ECS agent -- ~1.3 GiB, which a t3.micro's ~916 MiB registerable memory can't hold. The app itself is a thin FastAPI service that fit fine on t3.micro before rolling deploys."
   type        = string
-  default     = "t3.micro"
+  default     = "t3.small"
 }
 
 variable "instance_count" {
@@ -79,7 +79,7 @@ variable "instance_count" {
 }
 
 variable "container_memory" {
-  description = "Hard memory limit (MB) for cd-server's container. 400 leaves headroom on a 1GB t3.micro for the ECS agent and OS."
+  description = "Hard memory limit (MB) for cd-server's container. 400 leaves room on a 2GB t3.small for a second (surge) task, a one-shot migrate task during a release, and the ECS agent."
   type        = number
   default     = 400
 }
