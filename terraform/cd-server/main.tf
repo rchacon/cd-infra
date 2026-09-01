@@ -729,6 +729,23 @@ resource "aws_ecs_service" "cd_server" {
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
 
+  # cd-infra#64: a bad `cd-server-v*` rollout otherwise sits broken
+  # indefinitely -- the deploy workflow fires `update-service
+  # --force-new-deployment` and returns immediately without waiting for
+  # stability, and there's no rollback. The circuit breaker makes ECS
+  # give up after repeated failed task starts and redeploy the last
+  # known-good task definition on its own. Independent of the
+  # still-open question of eliminating the deploy blip itself (needs a
+  # bigger instance + a migrate/deploy split in cd-platform, see the
+  # 0/100 note above); this just bounds the blast radius of a broken
+  # image. With minimum_healthy_percent = 0 a failed deploy still has a
+  # gap before the rollback task is up, but it self-heals instead of
+  # staying down.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.cd_server.name
     weight            = 1
