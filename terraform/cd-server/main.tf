@@ -541,6 +541,54 @@ resource "aws_iam_role_policy" "task_permissions" {
 # wrong Cognito endpoint if they were ever deployed to different regions.
 locals {
   cognito_region = split(":", data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_arn)[3]
+
+  # Shared by the long-running service task and the one-shot migrate task
+  # (cd-infra#67) so the two never drift on image/env/secrets/logging.
+  cd_server_image = "ghcr.io/${var.github_repository_owner}/cd-server:latest"
+
+  # CD_SERVER_ENVIRONMENT anything other than "local" picks LambdaApiClient
+  # over HttpApiClient (see cd-server/src/cd/server/settings.py) --
+  # CD_API_BASE_URL is irrelevant in that mode. GRAPHIQL_ENABLED is
+  # deliberately unset -- already off by default in the production image
+  # (app.py/schema.py), unlike docker-compose.yml's dev service.
+  #
+  # cd-infra#48: PGHOST/PGPORT/PGDATABASE plus COGNITO_USER_POOL_ID/
+  # COGNITO_REGION/COGNITO_CLIENT_IDS -- all required by settings.py's
+  # get_users_service() for any ENVIRONMENT other than "local", where
+  # their absence is a fail-fast RuntimeError at import. COGNITO_REGION is
+  # local.cognito_region, derived from cd-webapp's own User Pool ARN
+  # rather than assumed equal to var.aws_region. COGNITO_CLIENT_IDS is
+  # comma-joined (settings.py's own parsing) from both cd-webapp App
+  # Clients sharing the one User Pool, since a token minted by either must
+  # verify here. None are secret -- only PGUSER/PGPASSWORD go through the
+  # `secrets` block below.
+  cd_server_environment = [
+    { name = "CD_SERVER_ENVIRONMENT", value = "production" },
+    { name = "CD_API_FUNCTION_NAME", value = data.aws_lambda_function.cd_api.function_name },
+    { name = "PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
+    { name = "PGPORT", value = "5432" },
+    { name = "PGDATABASE", value = var.cd_customers_db_name },
+    { name = "COGNITO_USER_POOL_ID", value = data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_id },
+    { name = "COGNITO_REGION", value = local.cognito_region },
+    {
+      name = "COGNITO_CLIENT_IDS"
+      value = join(",", [
+        data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_client_id,
+        data.terraform_remote_state.cd_webapp.outputs.cognito_dev_client_id,
+      ])
+    },
+  ]
+
+  cd_server_secrets = [
+    { name = "PGUSER", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:username::" },
+    { name = "PGPASSWORD", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:password::" },
+  ]
+
+  # Per-task-def `awslogs-stream-prefix` is merged in at the use site.
+  cd_server_log_options = {
+    "awslogs-group"  = aws_cloudwatch_log_group.cd_server.name
+    "awslogs-region" = var.aws_region
+  }
 }
 
 # bridge networking (not awsvpc) -- avoids per-task ENI cost/churn, same
@@ -559,9 +607,25 @@ resource "aws_ecs_task_definition" "cd_server" {
   container_definitions = jsonencode([
     {
       name      = "cd-server"
-      image     = "ghcr.io/${var.github_repository_owner}/cd-server:latest"
+      image     = local.cd_server_image
       essential = true
       memory    = var.container_memory
+
+      # entryPoint override -> the long-running task runs uvicorn directly
+      # and never executes the image's /entrypoint.sh, so it can't run
+      # `alembic upgrade head` -- migrations are owned by the one-shot
+      # cd_server_migrate task below (cd-infra#67), which is what lets the
+      # ECS service move to a surge deployment without two overlapping app
+      # tasks racing migrations. Same split as ../airflow-ecs's 4 services
+      # (entryPoint = ["airflow"] + command = [...]).
+      #
+      # This duplicates cd-server/docker/Dockerfile's CMD and MUST be kept
+      # in sync with it. CD_SERVER_MIGRATE_TASK=1 below is the backstop
+      # (cd-platform#133): if this override is ever dropped, the task
+      # falls into entrypoint.sh but still skips the migrate because of
+      # the env var.
+      entryPoint = ["uv", "run", "uvicorn"]
+      command    = ["cd.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
 
       portMappings = [
         {
@@ -571,55 +635,52 @@ resource "aws_ecs_task_definition" "cd_server" {
         }
       ]
 
-      # CD_SERVER_ENVIRONMENT anything other than "local" picks
-      # LambdaApiClient over HttpApiClient (see cd-server/src/cd/server/
-      # settings.py) -- CD_API_BASE_URL is irrelevant in that mode.
-      # GRAPHIQL_ENABLED is deliberately unset -- already off by default
-      # in the production image (app.py/schema.py), unlike
-      # docker-compose.yml's dev service which sets it to "true".
-      #
-      # cd-infra#48: PGHOST/PGPORT/PGDATABASE plus COGNITO_USER_POOL_ID/
-      # COGNITO_REGION/COGNITO_CLIENT_IDS -- both required by
-      # settings.py's get_users_service() for any ENVIRONMENT other than
-      # "local", where their absence is a fail-fast RuntimeError at
-      # import. COGNITO_REGION is local.cognito_region, derived from
-      # cd-webapp's own User Pool ARN (see locals block above) rather
-      # than assumed equal to var.aws_region. COGNITO_CLIENT_IDS is
-      # comma-joined (settings.py's own parsing) from both cd-webapp App
-      # Clients sharing the one User Pool, since a token minted by either
-      # must verify here. None of PGHOST/PGPORT/PGDATABASE/
-      # COGNITO_USER_POOL_ID/COGNITO_REGION/COGNITO_CLIENT_IDS are
-      # secret -- only PGUSER/PGPASSWORD (below) go through the `secrets`
-      # block.
-      environment = [
-        { name = "CD_SERVER_ENVIRONMENT", value = "production" },
-        { name = "CD_API_FUNCTION_NAME", value = data.aws_lambda_function.cd_api.function_name },
-        { name = "PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
-        { name = "PGPORT", value = "5432" },
-        { name = "PGDATABASE", value = var.cd_customers_db_name },
-        { name = "COGNITO_USER_POOL_ID", value = data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_id },
-        { name = "COGNITO_REGION", value = local.cognito_region },
-        {
-          name = "COGNITO_CLIENT_IDS"
-          value = join(",", [
-            data.terraform_remote_state.cd_webapp.outputs.cognito_user_pool_client_id,
-            data.terraform_remote_state.cd_webapp.outputs.cognito_dev_client_id,
-          ])
-        },
-      ]
-
-      secrets = [
-        { name = "PGUSER", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:username::" },
-        { name = "PGPASSWORD", valueFrom = "${aws_secretsmanager_secret.cd_server_app_db.arn}:password::" },
-      ]
+      environment = concat(local.cd_server_environment, [
+        { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
+      ])
+      secrets = local.cd_server_secrets
 
       logConfiguration = {
         logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.cd_server.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "cd-server"
-        }
+        options   = merge(local.cd_server_log_options, { "awslogs-stream-prefix" = "cd-server" })
+      }
+    }
+  ])
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+# One-shot migration task (cd-infra#67). Keeps the image's default
+# ENTRYPOINT ["/entrypoint.sh"] and passes `migrate`, so entrypoint.sh
+# runs `alembic upgrade head` and exits 0. Never a service -- the
+# cd-server-deploy.yml workflow (cd-platform, separate PR) will
+# `aws ecs run-task` this, `wait tasks-stopped`, assert exitCode 0, then
+# `update-service --force-new-deployment`. Mirrors
+# aws_ecs_task_definition.migrate in ../airflow-ecs.
+resource "aws_ecs_task_definition" "cd_server_migrate" {
+  family                   = "cd-platform-cd-server-migrate"
+  network_mode             = "bridge"
+  requires_compatibilities = ["EC2"]
+  execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "migrate"
+      image     = local.cd_server_image
+      essential = true
+      memory    = var.container_memory
+
+      command = ["migrate"]
+
+      environment = local.cd_server_environment
+      secrets     = local.cd_server_secrets
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options   = merge(local.cd_server_log_options, { "awslogs-stream-prefix" = "migrate" })
       }
     }
   ])
