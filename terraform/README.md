@@ -835,6 +835,47 @@ aws ecs update-service --cluster cd-platform-cd-server \
   --service cd-platform-cd-server --force-new-deployment
 ```
 
+### Rolling (zero-downtime) deploys (#67)
+
+The service is a surge deployment: `deployment_minimum_healthy_percent =
+100` / `deployment_maximum_percent = 200`, a 30s target-group
+`deregistration_delay`, and the circuit breaker (#66). `alembic upgrade
+head` is owned by a dedicated one-shot task (`cd-platform-cd-server-migrate`,
+default entrypoint + `command = ["migrate"]`), not every app task -- the
+long-running service task carries an `entryPoint` override (runs uvicorn
+directly, must stay in sync with `cd-server/docker/Dockerfile`'s `CMD`)
+plus `CD_SERVER_MIGRATE_TASK=1` as a backstop. The app-side split landed
+in cd-platform#133.
+
+**Apply order matters** -- the instance must be `t3.small` *before* the
+first `100/200` deploy, or the surge task can't fit alongside the running
+one on the old `t3.micro` and the rollout stalls:
+
+1. `terraform apply -target=aws_launch_template.cd_server` (picks up
+   `instance_type = t3.small`), then recycle the instance so it relaunches
+   on the new type -- the ASG (`version = "$Latest"`, `desired = 1`)
+   replaces a terminated instance automatically:
+   ```bash
+   ID=$(aws ecs list-container-instances --cluster cd-platform-cd-server \
+         --query 'containerInstanceArns[0]' --output text)
+   EC2=$(aws ecs describe-container-instances --cluster cd-platform-cd-server \
+         --container-instances "$ID" --query 'containerInstances[0].ec2InstanceId' --output text)
+   aws ec2 terminate-instances --instance-ids "$EC2"     # ~2-4 min task gap, one-time
+   ```
+   Confirm the replacement is `t3.small` and the cd-server task is
+   `RUNNING` again before step 2.
+2. `terraform apply` -- creates the migrate task def, flips the service to
+   `100/200`, adds the deploy role's `ecs:RunTask`/`iam:PassRole`/
+   `ecs:DescribeTasks`. The service update it triggers is the first
+   rolling deploy; watch `curl https://server.civicdog.com/health` for a
+   continuous-200 window.
+
+The `cd-server-deploy.yml` migrate-then-deploy step (`run-task` the
+migrate def -> `wait tasks-stopped` -> assert `exitCode 0` -> `update-service`)
+is a separate cd-platform PR, after this applies. Rolling deploys mean old
+code briefly runs against the new schema, so migrations must be
+expand/contract -- see `cd-server/README.md`.
+
 ## Validating without AWS credentials
 
 `terraform fmt -check -recursive` and `terraform validate` (after
