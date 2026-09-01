@@ -611,22 +611,17 @@ resource "aws_ecs_task_definition" "cd_server" {
       essential = true
       memory    = var.container_memory
 
-      # entryPoint override -> the long-running task runs uvicorn directly
-      # and never executes the image's /entrypoint.sh, so it can't run
-      # `alembic upgrade head` -- migrations are owned by the one-shot
-      # cd_server_migrate task below (cd-infra#67), which is what lets the
-      # ECS service move to a surge deployment without two overlapping app
-      # tasks racing migrations. Same split as ../airflow-ecs's 4 services
-      # (entryPoint = ["airflow"] + command = [...]).
-      #
-      # This duplicates cd-server/docker/Dockerfile's CMD and MUST be kept
-      # in sync with it. CD_SERVER_MIGRATE_TASK=1 below is the backstop
-      # (cd-platform#133): if this override is ever dropped, the task
-      # falls into entrypoint.sh but still skips the migrate because of
-      # the env var.
-      entryPoint = ["uv", "run", "uvicorn"]
-      command    = ["cd.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
-
+      # CD_SERVER_MIGRATE_TASK=1 (in `environment` below, cd-platform#133):
+      # entrypoint.sh sees it, skips the on-boot `alembic upgrade head`,
+      # and execs the image's CMD (uvicorn). Migrations are owned solely
+      # by the one-shot cd_server_migrate task below (cd-infra#67), which
+      # is what lets the ECS service move to a surge deployment without
+      # two overlapping app tasks racing migrations. No entryPoint
+      # override: entrypoint.sh does nothing but that conditional migrate
+      # + `exec "$@"`, so the env var alone is sufficient and avoids
+      # duplicating the Dockerfile CMD here. (../airflow-ecs's services
+      # do override entryPoint, but cd-etl's entrypoint.sh does
+      # unconditional setup that has to be bypassed; cd-server's doesn't.)
       portMappings = [
         {
           containerPort = 8000

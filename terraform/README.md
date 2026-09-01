@@ -853,10 +853,9 @@ The service is a surge deployment: `deployment_minimum_healthy_percent =
 `deregistration_delay`, and the circuit breaker (#66). `alembic upgrade
 head` is owned by a dedicated one-shot task (`cd-platform-cd-server-migrate`,
 default entrypoint + `command = ["migrate"]`), not every app task -- the
-long-running service task carries an `entryPoint` override (runs uvicorn
-directly, must stay in sync with `cd-server/docker/Dockerfile`'s `CMD`)
-plus `CD_SERVER_MIGRATE_TASK=1` as a backstop. The app-side split landed
-in cd-platform#133.
+long-running service task sets `CD_SERVER_MIGRATE_TASK=1`, which
+`entrypoint.sh` reads to skip the on-boot migrate and just exec the
+image's uvicorn `CMD`. The app-side split landed in cd-platform#133.
 
 **Apply order matters** -- the instance must be `t3.small` *before* the
 first `100/200` deploy, or the surge task can't fit alongside the running
