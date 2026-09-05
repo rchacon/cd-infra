@@ -500,6 +500,26 @@ resource "aws_iam_role" "task" {
   }
 }
 
+# Anthropic Claude via Bedrock's Converse API -- cd-infra#69,
+# cd-server's summarizeVotingRecord (cd-platform#161-163). Invoked
+# through the US cross-region inference profile (the "us."-prefixed id),
+# not a bare on-demand model id -- Anthropic models on Bedrock require an
+# inference profile. This one local is the whole switch for swapping
+# models/tiers later; the IAM statement and the BEDROCK_CHAT_MODEL_ID
+# task env var below both derive from it. Confirm the exact id against
+# the Bedrock console when enabling model access (a manual step -- model
+# access can't be Terraform-managed).
+locals {
+  bedrock_chat_profile_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+  # Regions the US inference profile can route an invocation to. Model
+  # access must be enabled in every one (manual console step, in each
+  # region), and the IAM policy below needs the foundation-model ARN in
+  # each -- a cross-region profile invocation is authorized against both
+  # the profile ARN and the resolved foundation-model ARN.
+  bedrock_chat_profile_regions = ["us-east-1", "us-east-2", "us-west-2"]
+}
+
 data "aws_iam_policy_document" "task_permissions" {
   # The one runtime permission cd-server's LambdaApiClient actually needs
   # -- it invokes ../cd-api's Lambda directly via boto3, bypassing API
@@ -508,6 +528,25 @@ data "aws_iam_policy_document" "task_permissions" {
     sid       = "InvokeCdApiLambda"
     actions   = ["lambda:InvokeFunction"]
     resources = [data.aws_lambda_function.cd_api.arn]
+  }
+
+  # Bedrock Converse for summarizeVotingRecord -- cd-infra#69. The
+  # Converse operation authorizes as bedrock:InvokeModel (there is no
+  # separate bedrock:Converse IAM action). Invoked via the US
+  # cross-region inference profile, so the resource list needs both the
+  # inference-profile ARN (account-qualified, in the calling region) and
+  # the bare foundation-model ARN in every region the profile can route
+  # to. Scoped to this one model, not "*" -- same precedent as cd-api's
+  # lambda_bedrock_permissions (#55) and cd-etl's task_bedrock_permissions
+  # (#54).
+  statement {
+    sid     = "InvokeClaudeForSummaries"
+    actions = ["bedrock:InvokeModel"]
+    resources = concat(
+      ["arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${local.bedrock_chat_profile_id}"],
+      [for region in local.bedrock_chat_profile_regions :
+      "arn:aws:bedrock:${region}::foundation-model/${trimprefix(local.bedrock_chat_profile_id, "us.")}"],
+    )
   }
 
   # ECS Exec (enable_execute_command below) -- same "no more manual
