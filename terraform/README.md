@@ -886,6 +886,32 @@ is a separate cd-platform PR, after this applies. Rolling deploys mean old
 code briefly runs against the new schema, so migrations must be
 expand/contract -- see `cd-server/README.md`.
 
+### Bedrock model access (#69)
+
+`cd-server`'s `summarizeVotingRecord` (cd-platform#161-163) calls Bedrock's
+Converse API with an Anthropic Claude model. Terraform grants the task role
+`bedrock:InvokeModel` (scoped to one model, `local.bedrock_chat_profile_id`
+in `main.tf` -- currently the `us.anthropic.claude-haiku-4-5` US
+cross-region inference profile) and sets `BEDROCK_CHAT_MODEL_ID` on the
+task, but **model access itself is a manual Console step Terraform can't
+manage**. Before the first invocation:
+
+1. In the Bedrock Console, request access to the chosen Claude model in
+   **each** region the US inference profile routes to -- `us-east-1`,
+   `us-east-2`, `us-west-2` (`local.bedrock_chat_profile_regions`). The
+   IAM policy already lists the foundation-model ARN in all three.
+2. Confirm the exact inference-profile id in the Console matches
+   `local.bedrock_chat_profile_id`; if AWS's id string differs, that one
+   local is the only thing to change (the IAM ARNs and the task env var
+   both derive from it).
+
+Egress is already covered -- `../networking`'s `cd_server_https` rule
+permits 443 to `bedrock-runtime` via NAT (the `bedrock:InvokeModel` grant
+is necessary but not sufficient without it, the gap #58 hit for cd-api).
+The `BEDROCK_CHAT_MODEL_ID` env var must be live before cd-platform's
+GraphQL-wiring deploy -- `get_bedrock_chat_client()` is a fail-fast
+`RuntimeError` at import when it's unset in a non-`local` env.
+
 ## Validating without AWS credentials
 
 `terraform fmt -check -recursive` and `terraform validate` (after
