@@ -284,12 +284,15 @@ resource "aws_vpc_security_group_ingress_rule" "cd_server_from_alb" {
 }
 
 # GHCR image pulls, the Census geocoder API, Lambda's regional HTTPS
-# endpoint (cd-server's LambdaApiClient), and SSM -- arbitrary internet
+# endpoint (cd-server's LambdaApiClient), bedrock-runtime (cd-infra#69,
+# summarizeVotingRecord's Converse call), and SSM -- arbitrary internet
 # destinations with no fixed IP ranges to scope to, same reasoning as
-# airflow_https's egress rule above.
+# airflow_https's egress rule above. The bedrock:InvokeModel grant in
+# ../cd-server is necessary but not sufficient without this path -- the
+# same gap #58 hit for cd-api's Lambda SG.
 resource "aws_vpc_security_group_egress_rule" "cd_server_https" {
   security_group_id = aws_security_group.cd_server.id
-  description       = "HTTPS to GHCR, the Census geocoder, AWS APIs (Lambda invoke, SSM)"
+  description       = "HTTPS to GHCR, the Census geocoder, AWS APIs (Lambda invoke, Bedrock, SSM)"
   from_port         = 443
   to_port           = 443
   ip_protocol       = "tcp"
