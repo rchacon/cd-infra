@@ -601,9 +601,20 @@ locals {
   # Clients sharing the one User Pool, since a token minted by either must
   # verify here. None are secret -- only PGUSER/PGPASSWORD go through the
   # `secrets` block below.
+  #
+  # cd-infra#69: AWS_REGION + BEDROCK_CHAT_MODEL_ID for summarizeVotingRecord's
+  # Bedrock Converse call. cd-lib/bedrock.py reads AWS_REGION explicitly
+  # (NoRegionError at client construction otherwise) with a us-west-2
+  # fallback -- set it rather than lean on a fallback that happens to
+  # match. BEDROCK_CHAT_MODEL_ID unset in a non-local env is a fail-fast
+  # RuntimeError at import in cd-server's get_bedrock_chat_client(), so it
+  # must be in place before cd-platform's GraphQL-wiring deploy lands
+  # (setting it now is harmless -- nothing calls that until then).
   cd_server_environment = [
     { name = "CD_SERVER_ENVIRONMENT", value = "production" },
     { name = "CD_API_FUNCTION_NAME", value = data.aws_lambda_function.cd_api.function_name },
+    { name = "AWS_REGION", value = var.aws_region },
+    { name = "BEDROCK_CHAT_MODEL_ID", value = local.bedrock_chat_profile_id },
     { name = "PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
     { name = "PGPORT", value = "5432" },
     { name = "PGDATABASE", value = var.cd_customers_db_name },
