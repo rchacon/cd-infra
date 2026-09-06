@@ -602,17 +602,32 @@ locals {
   # verify here. None are secret -- only PGUSER/PGPASSWORD go through the
   # `secrets` block below.
   #
-  # cd-infra#69: AWS_REGION + BEDROCK_CHAT_MODEL_ID for summarizeVotingRecord's
-  # Bedrock Converse call. cd-lib/bedrock.py reads AWS_REGION explicitly
-  # (NoRegionError at client construction otherwise) with a us-west-2
-  # fallback -- set it rather than lean on a fallback that happens to
-  # match. BEDROCK_CHAT_MODEL_ID unset in a non-local env is a fail-fast
-  # RuntimeError at import in cd-server's get_bedrock_chat_client(), so it
-  # must be in place before cd-platform's GraphQL-wiring deploy lands
-  # (setting it now is harmless -- nothing calls that until then).
+  # AWS_DEFAULT_REGION / AWS_REGION: pin cd-server's region explicitly so
+  # nothing depends on IMDS region resolution. This service's tasks
+  # cannot resolve a region from IMDS -- verified by running a fresh
+  # container off the exact running image digest with no region env at
+  # all: cd_api_service.py's bare boto3.client("lambda") still raises
+  # NoRegionError at import. The long-running task only survives because
+  # it's an old process that resolved its region when it first started;
+  # any new task (a deploy, an instance recycle, a crash-restart) would
+  # crash-loop. cd-infra#69's env change was simply the first thing to
+  # start a new task and expose it. Both var names are set: botocore's
+  # own default region resolution reads only AWS_DEFAULT_REGION, while
+  # cd-lib/bedrock.py reads AWS_REGION by that exact name and passes it
+  # as region_name= to the bedrock-runtime client.
+  #
+  # BEDROCK_CHAT_MODEL_ID (cd-infra#69): the us. inference-profile id for
+  # summarizeVotingRecord's Bedrock Converse call. Harmless on today's
+  # shipped image (the AI-summary/GraphQL wiring, cd-platform#161-#163 /
+  # #198, is merged to cd-platform main but NOT yet in a tagged
+  # cd-server release, so nothing reads it) -- set here so the infra is
+  # already in place when that release ships: get_bedrock_chat_client()
+  # is then a fail-fast RuntimeError at import when it's unset in a
+  # non-local env.
   cd_server_environment = [
     { name = "CD_SERVER_ENVIRONMENT", value = "production" },
     { name = "CD_API_FUNCTION_NAME", value = data.aws_lambda_function.cd_api.function_name },
+    { name = "AWS_DEFAULT_REGION", value = var.aws_region },
     { name = "AWS_REGION", value = var.aws_region },
     { name = "BEDROCK_CHAT_MODEL_ID", value = local.bedrock_chat_profile_id },
     { name = "PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
