@@ -974,13 +974,16 @@ psql "host=localhost port=15432 dbname=cd_customers user=cd_customers_readonly" 
   -c 'SELECT count(*) FROM users;' -c 'SELECT count(*) FROM ai_summaries;'
 ```
 
-The IAM identity running `aws ssm start-session` needs `ssm:StartSession`
-on the instance **and** on
+The IAM identity running step 2's `aws ssm start-session` needs
+`ssm:StartSession` on the instance **and** on
 `arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost`,
 plus `ssm:TerminateSession`/`ssm:ResumeSession` on
-`arn:aws:ssm:*:*:session/${aws:username}-*`. That policy is
-Console-managed and built empirically (see CLAUDE.md's IAM section) --
-add these if `start-session` returns `AccessDenied`.
+`arn:aws:ssm:*:*:session/${aws:username}-*`. Step 3's `get-secret-value`
+additionally needs `secretsmanager:GetSecretValue` on the secret and
+`kms:Decrypt` on `alias/cd-platform-cd-server` (the secret is
+CMK-encrypted). That policy is Console-managed and built empirically (see
+CLAUDE.md's IAM section) -- add whichever action a command names in an
+`AccessDenied`.
 
 `terraform apply` creates the role's secret and a new launch-template
 version but does **not** recycle the running instance, so the new
