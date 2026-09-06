@@ -506,17 +506,18 @@ resource "aws_iam_role" "task" {
 # not a bare on-demand model id -- Anthropic models on Bedrock require an
 # inference profile. This one local is the whole switch for swapping
 # models/tiers later; the IAM statement and the BEDROCK_CHAT_MODEL_ID
-# task env var below both derive from it. Confirm the exact id against
-# the Bedrock console when enabling model access (a manual step -- model
-# access can't be Terraform-managed).
+# task env var below both derive from it. No separate model-access step:
+# AWS retired the Bedrock "Model access" page, so serverless-model access
+# is IAM-only now and the bedrock:InvokeModel grant below is sufficient
+# (verified from us-west-2; us-east-1/us-east-2 tracked in #72). If AWS's
+# id string ever differs from this, this local is the only edit.
 locals {
   bedrock_chat_profile_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-  # Regions the US inference profile can route an invocation to. Model
-  # access must be enabled in every one (manual console step, in each
-  # region), and the IAM policy below needs the foundation-model ARN in
-  # each -- a cross-region profile invocation is authorized against both
-  # the profile ARN and the resolved foundation-model ARN.
+  # Regions the US inference profile can route an invocation to -- the
+  # IAM policy below needs the foundation-model ARN in each, since a
+  # cross-region profile invocation is authorized against both the
+  # profile ARN and the resolved foundation-model ARN.
   bedrock_chat_profile_regions = ["us-east-1", "us-east-2", "us-west-2"]
 }
 
