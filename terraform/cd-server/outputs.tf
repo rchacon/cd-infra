@@ -18,6 +18,11 @@ output "server_domain_url" {
   value       = "https://${var.server_domain_name}"
 }
 
+output "cd_customers_readonly_secret_arn" {
+  description = "Secrets Manager ARN holding the cd_customers read-only role's credentials -- fetch with `aws secretsmanager get-secret-value` for the SQL-GUI tunnel workflow in terraform/README.md."
+  value       = aws_secretsmanager_secret.cd_customers_readonly_db.arn
+}
+
 output "cd_server_deploy_role_arn" {
   description = "ARN of the GitHub OIDC deploy role -- what a future cd-server-deploy.yml step would assume to call ecs:UpdateService/DescribeServices (see main.tf's comment on why that workflow step isn't wired up yet)."
   value       = aws_iam_role.cd_server_deploy.arn
