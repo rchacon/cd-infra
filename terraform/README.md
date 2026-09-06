@@ -908,9 +908,28 @@ manage**. Before the first invocation:
 Egress is already covered -- `../networking`'s `cd_server_https` rule
 permits 443 to `bedrock-runtime` via NAT (the `bedrock:InvokeModel` grant
 is necessary but not sufficient without it, the gap #58 hit for cd-api).
-The `BEDROCK_CHAT_MODEL_ID` env var must be live before cd-platform's
-GraphQL-wiring deploy -- `get_bedrock_chat_client()` is a fail-fast
-`RuntimeError` at import when it's unset in a non-`local` env.
+
+The task def also sets `BEDROCK_CHAT_MODEL_ID` and **both**
+`AWS_DEFAULT_REGION` and `AWS_REGION` (all `= var.aws_region`).
+
+The region vars fix a **latent bug this change surfaced rather than
+caused**: cd-server's tasks can't resolve a region from IMDS, so
+`cd_api_service.py`'s bare `boto3.client("lambda")` `NoRegionError`s at
+import -- confirmed by running a fresh container off the exact running
+image digest with no region env at all. The long-running task only
+survives because it's an old process that resolved its region at
+startup; any new task (deploy, instance recycle, crash-restart) would
+crash-loop. Fix: pin the region explicitly -- `AWS_DEFAULT_REGION` (the
+only name botocore's default resolution reads) plus `AWS_REGION` (which
+`cd-lib/bedrock.py` reads by that exact name). The first apply
+crash-looped and the circuit breaker rolled it back with no outage.
+
+`BEDROCK_CHAT_MODEL_ID` is harmless on the current shipped image -- the
+AI-summary/GraphQL wiring (cd-platform#161-#163 / #198) is on cd-platform
+`main` but not in a tagged cd-server release yet, so nothing reads it. It
+is set now so the infra is ready when that release ships:
+`get_bedrock_chat_client()` is then a fail-fast `RuntimeError` at import
+if unset in a non-`local` env.
 
 ## Validating without AWS credentials
 
