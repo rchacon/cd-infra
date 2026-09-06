@@ -98,3 +98,9 @@ variable "cd_server_db_username" {
   type        = string
   default     = "cd_server_app"
 }
+
+variable "cd_customers_readonly_username" {
+  description = "Read-only Postgres role on cd_customers for ad-hoc inspection (row counts, spot checks) from a local SQL GUI over an SSM tunnel. Created idempotently by the ECS instance's first-boot bootstrap, same pattern as cd_server_db_username; granted pg_read_all_data and forced read-only, never write access."
+  type        = string
+  default     = "cd_customers_readonly"
+}

@@ -33,6 +33,10 @@ CD_SERVER_APP_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
   --secret-id "${cd_server_app_db_secret_arn}" --query SecretString --output text)
 CD_SERVER_APP_PASS=$(echo "$CD_SERVER_APP_SECRET" | jq -r .password)
 
+CD_CUSTOMERS_RO_SECRET=$(aws secretsmanager get-secret-value --region "$REGION" \
+  --secret-id "${cd_customers_readonly_db_secret_arn}" --query SecretString --output text)
+CD_CUSTOMERS_RO_PASS=$(echo "$CD_CUSTOMERS_RO_SECRET" | jq -r .password)
+
 # One-time, idempotent bootstrap (safe to re-run on every boot) using the
 # RDS master/superuser credentials -- creates the cd_customers database
 # (RDS has no docker-entrypoint-initdb.d equivalent) and a scoped
@@ -45,6 +49,15 @@ CD_SERVER_APP_PASS=$(echo "$CD_SERVER_APP_SECRET" | jq -r .password)
 # ... $$` PL/pgSQL blocks entirely -- bash would expand an unescaped `$$`
 # in a heredoc to its own PID, corrupting Postgres's dollar-quoting
 # syntax.
+#
+# The cd_customers_readonly role alongside cd_server_app is a SELECT-only
+# login for ad-hoc inspection over an SSM tunnel (terraform/README.md).
+# pg_read_all_data (a Postgres 14+ predefined role) confers SELECT on
+# every current and future table/view in every schema plus schema USAGE,
+# evaluated at query time -- so tables added by later Alembic migrations
+# are readable with no ALTER DEFAULT PRIVILEGES bookkeeping; the RDS
+# master (rds_superuser) can grant it. default_transaction_read_only is a
+# belt-and-suspenders write block.
 export PGPASSWORD="$RDS_PASS"
 psql -h ${rds_address} -U "$RDS_USER" -d postgres -v ON_ERROR_STOP=1 <<-SQL
 SELECT 'CREATE DATABASE ${cd_customers_db_name}'
@@ -54,10 +67,19 @@ SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', '${cd_server_db_username}', '$
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${cd_server_db_username}')\gexec
 
 ALTER ROLE "${cd_server_db_username}" WITH PASSWORD '$CD_SERVER_APP_PASS';
+
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', '${cd_customers_readonly_username}', '$CD_CUSTOMERS_RO_PASS')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${cd_customers_readonly_username}')\gexec
+
+ALTER ROLE "${cd_customers_readonly_username}" WITH PASSWORD '$CD_CUSTOMERS_RO_PASS';
+ALTER ROLE "${cd_customers_readonly_username}" SET default_transaction_read_only = on;
 SQL
 
 psql -h ${rds_address} -U "$RDS_USER" -d "${cd_customers_db_name}" -v ON_ERROR_STOP=1 <<-SQL
 GRANT ALL PRIVILEGES ON DATABASE "${cd_customers_db_name}" TO "${cd_server_db_username}";
 GRANT ALL ON SCHEMA public TO "${cd_server_db_username}";
+
+GRANT CONNECT ON DATABASE "${cd_customers_db_name}" TO "${cd_customers_readonly_username}";
+GRANT pg_read_all_data TO "${cd_customers_readonly_username}";
 SQL
 unset PGPASSWORD

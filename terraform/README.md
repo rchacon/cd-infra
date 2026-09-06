@@ -935,6 +935,63 @@ is set now so the infra is ready when that release ships:
 `get_bedrock_chat_client()` is then a fail-fast `RuntimeError` at import
 if unset in a non-`local` env.
 
+### Inspecting `cd_customers` (read-only) via an SSM tunnel
+
+`cd_customers` has a second login role, `cd_customers_readonly` -- SELECT
+on every table (`pg_read_all_data`) and nothing else
+(`default_transaction_read_only = on`), created by the same first-boot
+bootstrap that creates `cd_server_app`. Its password lives in the
+`cd-platform/cd-server/db-credentials-readonly` Secrets Manager secret.
+RDS has no public ingress, so reach it through the cd-server ECS
+container instance (the one thing in a security group RDS allows on
+5432), port-forwarded to localhost for a SQL GUI (DBeaver / TablePlus /
+`psql`). Needs the AWS CLI [Session Manager
+plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+installed locally.
+
+```bash
+# 1. target instance id (same ECS lookup the rollout steps above use) + RDS host
+CLUSTER=cd-platform-cd-server
+CI=$(aws ecs list-container-instances --cluster "$CLUSTER" \
+      --query 'containerInstanceArns[0]' --output text)
+EC2=$(aws ecs describe-container-instances --cluster "$CLUSTER" \
+      --container-instances "$CI" --query 'containerInstances[0].ec2InstanceId' --output text)
+RDS_ADDRESS=$(terraform -chdir=../rds output -raw rds_address)
+
+# 2. open the tunnel -- leave this running in its own terminal
+aws ssm start-session --target "$EC2" \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters "{\"host\":[\"$RDS_ADDRESS\"],\"portNumber\":[\"5432\"],\"localPortNumber\":[\"15432\"]}"
+
+# 3. password (private terminal only -- never printed by apply)
+aws secretsmanager get-secret-value \
+  --secret-id cd-platform/cd-server/db-credentials-readonly \
+  --query SecretString --output text | jq -r .password
+
+# 4. connect: host localhost, port 15432, db cd_customers, user cd_customers_readonly
+psql "host=localhost port=15432 dbname=cd_customers user=cd_customers_readonly" \
+  -c 'SELECT count(*) FROM users;' -c 'SELECT count(*) FROM ai_summaries;'
+```
+
+The IAM identity running `aws ssm start-session` needs `ssm:StartSession`
+on the instance **and** on
+`arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost`,
+plus `ssm:TerminateSession`/`ssm:ResumeSession` on
+`arn:aws:ssm:*:*:session/${aws:username}-*`. That policy is
+Console-managed and built empirically (see CLAUDE.md's IAM section) --
+add these if `start-session` returns `AccessDenied`.
+
+`terraform apply` creates the role's secret and a new launch-template
+version but does **not** recycle the running instance, so the new
+`user-data` (which creates the role) doesn't run on its own. Either let
+the next instance recycle pick it up, or activate it immediately with no
+task gap by running the same guarded `CREATE ROLE` / `GRANT` SQL on the
+live instance via `aws ssm send-command --document-name
+AWS-RunShellScript` (the same pattern as `cd-api/`'s manual role
+bootstrap above), fetching both the RDS master secret
+(`terraform -chdir=../rds output -raw master_user_secret_arn`) and the
+new read-only secret.
+
 ## Validating without AWS credentials
 
 `terraform fmt -check -recursive` and `terraform validate` (after

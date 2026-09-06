@@ -185,6 +185,38 @@ resource "aws_secretsmanager_secret_version" "cd_server_app_db" {
   })
 }
 
+# --- cd_customers read-only credentials -----------------------------------
+#
+# A second login role on cd_customers, scoped to SELECT-only, for ad-hoc
+# inspection from a local SQL GUI over an SSM tunnel (see
+# terraform/README.md's "Inspecting cd_customers" section). Same "instance
+# bootstraps its own role, password lives in its own Secrets Manager
+# secret" pattern as cd_server_app above -- alphanumeric-only for the same
+# SQL-literal-quoting reason, recovery_window_in_days = 0 for the same
+# "trivially regenerable random_password, not irreplaceable data" reason.
+resource "random_password" "cd_customers_readonly" {
+  length  = 32
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "cd_customers_readonly_db" {
+  name                    = "cd-platform/cd-server/db-credentials-readonly"
+  kms_key_id              = aws_kms_key.cd_server.arn
+  recovery_window_in_days = 0
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "cd_customers_readonly_db" {
+  secret_id = aws_secretsmanager_secret.cd_customers_readonly_db.id
+  secret_string = jsonencode({
+    username = var.cd_customers_readonly_username
+    password = random_password.cd_customers_readonly.result
+  })
+}
+
 # --- Logs -------------------------------------------------------------------
 
 resource "aws_cloudwatch_log_group" "cd_server" {
@@ -266,6 +298,7 @@ data "aws_iam_policy_document" "ecs_instance_bootstrap" {
     resources = [
       data.terraform_remote_state.rds.outputs.master_user_secret_arn,
       aws_secretsmanager_secret.cd_server_app_db.arn,
+      aws_secretsmanager_secret.cd_customers_readonly_db.arn,
     ]
   }
 
@@ -324,13 +357,15 @@ resource "aws_launch_template" "cd_server" {
   # database/role on RDS, same pattern as ../airflow-ecs's identical
   # template.
   user_data = base64encode(templatefile("${path.module}/templates/user-data.sh.tftpl", {
-    ecs_cluster_name            = aws_ecs_cluster.cd_server.name
-    aws_region                  = var.aws_region
-    rds_master_secret_arn       = data.terraform_remote_state.rds.outputs.master_user_secret_arn
-    cd_server_app_db_secret_arn = aws_secretsmanager_secret.cd_server_app_db.arn
-    rds_address                 = data.terraform_remote_state.rds.outputs.rds_address
-    cd_customers_db_name        = var.cd_customers_db_name
-    cd_server_db_username       = var.cd_server_db_username
+    ecs_cluster_name                    = aws_ecs_cluster.cd_server.name
+    aws_region                          = var.aws_region
+    rds_master_secret_arn               = data.terraform_remote_state.rds.outputs.master_user_secret_arn
+    cd_server_app_db_secret_arn         = aws_secretsmanager_secret.cd_server_app_db.arn
+    cd_customers_readonly_db_secret_arn = aws_secretsmanager_secret.cd_customers_readonly_db.arn
+    rds_address                         = data.terraform_remote_state.rds.outputs.rds_address
+    cd_customers_db_name                = var.cd_customers_db_name
+    cd_server_db_username               = var.cd_server_db_username
+    cd_customers_readonly_username      = var.cd_customers_readonly_username
   }))
 
   # Enforces IMDSv2 -- same reasoning as ../airflow's instance (the AWS
@@ -373,6 +408,7 @@ resource "aws_launch_template" "cd_server" {
   # policy's permissions, failing the RDS bootstrap with AccessDenied.
   depends_on = [
     aws_secretsmanager_secret_version.cd_server_app_db,
+    aws_secretsmanager_secret_version.cd_customers_readonly_db,
     aws_iam_role_policy.ecs_instance_bootstrap,
   ]
 
