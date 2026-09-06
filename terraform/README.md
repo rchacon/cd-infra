@@ -938,7 +938,8 @@ if unset in a non-`local` env.
 ### Inspecting `cd_customers` (read-only) via an SSM tunnel
 
 `cd_customers` has a second login role, `cd_customers_readonly` -- SELECT
-on every table (`pg_read_all_data`) and nothing else
+on every table in `cd_customers` (scoped to that database's `public`
+schema, *not* the cluster-wide `pg_read_all_data`) and forced read-only
 (`default_transaction_read_only = on`), created by the same first-boot
 bootstrap that creates `cd_server_app`. Its password lives in the
 `cd-platform/cd-server/db-credentials-readonly` Secrets Manager secret.

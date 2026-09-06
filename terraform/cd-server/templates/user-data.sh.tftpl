@@ -52,12 +52,15 @@ CD_CUSTOMERS_RO_PASS=$(echo "$CD_CUSTOMERS_RO_SECRET" | jq -r .password)
 #
 # The cd_customers_readonly role alongside cd_server_app is a SELECT-only
 # login for ad-hoc inspection over an SSM tunnel (terraform/README.md).
-# pg_read_all_data (a Postgres 14+ predefined role) confers SELECT on
-# every current and future table/view in every schema plus schema USAGE,
-# evaluated at query time -- so tables added by later Alembic migrations
-# are readable with no ALTER DEFAULT PRIVILEGES bookkeeping; the RDS
-# master (rds_superuser) can grant it. default_transaction_read_only is a
-# belt-and-suspenders write block.
+# Its grants are scoped to *this* database's public schema -- deliberately
+# NOT the cluster-wide pg_read_all_data predefined role, which (PUBLIC
+# keeps CONNECT on every database by default, and nothing revokes it)
+# would also expose cd_platform and airflow_metadata on this shared RDS
+# instance. Future tables are covered by an ALTER DEFAULT PRIVILEGES run
+# as cd_server_app (the third psql block below) -- Alembic migrations run
+# as that role so it owns every table here, and default privileges only
+# apply to objects created by the role that sets them.
+# default_transaction_read_only is a belt-and-suspenders write block.
 export PGPASSWORD="$RDS_PASS"
 psql -h ${rds_address} -U "$RDS_USER" -d postgres -v ON_ERROR_STOP=1 <<-SQL
 SELECT 'CREATE DATABASE ${cd_customers_db_name}'
@@ -80,6 +83,19 @@ GRANT ALL PRIVILEGES ON DATABASE "${cd_customers_db_name}" TO "${cd_server_db_us
 GRANT ALL ON SCHEMA public TO "${cd_server_db_username}";
 
 GRANT CONNECT ON DATABASE "${cd_customers_db_name}" TO "${cd_customers_readonly_username}";
-GRANT pg_read_all_data TO "${cd_customers_readonly_username}";
+GRANT USAGE ON SCHEMA public TO "${cd_customers_readonly_username}";
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO "${cd_customers_readonly_username}";
+SQL
+
+# As cd_server_app, not the master: ALTER DEFAULT PRIVILEGES only affects
+# objects created by the role that runs it, and Alembic migrations (the
+# one-shot migrate task) create every cd_customers table as this role.
+# This keeps cd_customers_readonly readable across future migrations
+# without re-running the bootstrap. The GRANT SELECT re-run is a no-op
+# safety for tables that already exist.
+export PGPASSWORD="$CD_SERVER_APP_PASS"
+psql -h ${rds_address} -U "${cd_server_db_username}" -d "${cd_customers_db_name}" -v ON_ERROR_STOP=1 <<-SQL
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO "${cd_customers_readonly_username}";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "${cd_customers_readonly_username}";
 SQL
 unset PGPASSWORD
