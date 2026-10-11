@@ -71,9 +71,10 @@ CREATE EXTENSION IF NOT EXISTS vector;
 SQL
 unset PGPASSWORD
 
-# Host-level memory metrics -- Container Insights (see main.tf's
-# aws_ecs_cluster) only reports per-*container* memory against each
-# task's own cgroup limit, not the underlying host's overall usage. With
+# Host-level memory metrics -- AWS/ECS's per-service MemoryUtilization
+# (see main.tf's aws_cloudwatch_dashboard) only reports per-*task* memory
+# against each task's own reservation, not the underlying host's overall
+# usage. With
 # all 4 services' containers on this single instance, their limits alone
 # (1GiB scheduler + 512MiB x3) already add up to most of the t3.medium's
 # 4GiB, leaving little visibility into whether the host itself (Docker

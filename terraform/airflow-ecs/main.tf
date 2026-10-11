@@ -267,20 +267,15 @@ resource "aws_service_discovery_http_namespace" "airflow" {
 resource "aws_ecs_cluster" "airflow" {
   name = "cd-platform-airflow"
 
-  # Publishes per-task/per-service CPU and memory utilization to
-  # CloudWatch (ECS/ContainerInsights namespace) plus a built-in
-  # CloudWatch dashboard with historical graphs -- was off by default,
-  # confirmed the hard way that debugging a real OOM (#59's
-  # fetch_member_votes) meant manually polling `docker stats` over SSM
-  # every ~20s for several minutes instead of glancing at a graph.
-  # "enabled" (the standard tier), not "enhanced" -- matches this
-  # project's cost-conscious default posture; enhanced's extra
-  # container/process-level detail isn't needed for a single-instance
-  # cluster this size.
-  setting {
-    name  = "containerInsights"
-    value = "enabled"
-  }
+  # Container Insights deliberately left off (AWS's default). Even the
+  # standard tier publishes ~95 custom metrics for this cluster (cluster +
+  # 4 services x 13 + 4 task families x 8, at $0.30 each) -- ~$26-29/mo,
+  # roughly a quarter of this project's whole AWS bill. The free AWS/ECS
+  # namespace already has per-service CPUUtilization/MemoryUtilization
+  # (as % of each task's reservation -- 100% memory is the OOM line #59
+  # hit), which is what the cd-platform-airflow dashboard below graphs.
+  # Can be switched on temporarily (a `containerInsights` setting block,
+  # billed hourly) if per-task-family detail is ever needed for a debug.
 
   service_connect_defaults {
     namespace = aws_service_discovery_http_namespace.airflow.arn
@@ -1203,12 +1198,14 @@ resource "aws_iam_role_policy" "airflow_deploy" {
 }
 
 # Single-pane-of-glass view combining the two metric sources that only
-# exist as separate CloudWatch UIs otherwise (Container Insights'
-# built-in dashboard vs. the CloudWatch Agent's host-level metric, see
+# exist as separate CloudWatch UIs otherwise (the free AWS/ECS
+# per-service metrics vs. the CloudWatch Agent's host-level metric, see
 # templates/user-data.sh.tftpl). Every widget uses a SEARCH() expression
 # rather than a hardcoded dimension -- the instance is ASG-managed (no
 # stable InstanceId across replacement) and services could be
 # added/removed later, so hardcoding either would silently go stale.
+# Per-service widgets use Maximum, not Average -- a memory spike toward
+# the OOM line is exactly what an Average over 5 minutes smooths away.
 resource "aws_cloudwatch_dashboard" "airflow" {
   dashboard_name = "cd-platform-airflow"
 
@@ -1240,16 +1237,19 @@ resource "aws_cloudwatch_dashboard" "airflow" {
         width  = 12
         height = 6
         properties = {
-          title   = "Per-service memory utilized (Container Insights)"
+          title   = "Per-service memory utilization (% of task reservation)"
           region  = var.aws_region
           view    = "timeSeries"
           stacked = false
           metrics = [
             [{
-              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"MemoryUtilized\"', 'Average', 300)"
+              expression = "SEARCH('{AWS/ECS,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"MemoryUtilization\"', 'Maximum', 300)"
               id         = "svcMem"
             }]
           ]
+          yAxis = {
+            left = { label = "Percent", min = 0 }
+          }
         }
       },
       {
@@ -1259,39 +1259,19 @@ resource "aws_cloudwatch_dashboard" "airflow" {
         width  = 12
         height = 6
         properties = {
-          title   = "Per-service CPU utilized (Container Insights)"
+          title   = "Per-service CPU utilization (% of task reservation)"
           region  = var.aws_region
           view    = "timeSeries"
           stacked = false
           metrics = [
             [{
-              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"CpuUtilized\"', 'Average', 300)"
+              expression = "SEARCH('{AWS/ECS,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"CPUUtilization\"', 'Maximum', 300)"
               id         = "svcCpu"
             }]
           ]
-        }
-      },
-      {
-        type   = "metric"
-        x      = 0
-        y      = 12
-        width  = 24
-        height = 6
-        properties = {
-          title   = "Running vs. desired tasks per service (Container Insights)"
-          region  = var.aws_region
-          view    = "timeSeries"
-          stacked = false
-          metrics = [
-            [{
-              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"RunningTaskCount\"', 'Average', 300)"
-              id         = "svcRunning"
-            }],
-            [{
-              expression = "SEARCH('{ECS/ContainerInsights,ClusterName,ServiceName} ClusterName=\"${aws_ecs_cluster.airflow.name}\" MetricName=\"DesiredTaskCount\"', 'Average', 300)"
-              id         = "svcDesired"
-            }]
-          ]
+          yAxis = {
+            left = { label = "Percent", min = 0 }
+          }
         }
       }
     ]
