@@ -7,10 +7,10 @@ data "terraform_remote_state" "networking" {
   }
 }
 
-# Only for cd_api's lambda_function_name output -- cd-server's
-# LambdaApiClient calls that function directly via boto3, not over
-# HTTP/VPC networking, so this is the one thing this module needs from
-# ../cd-api's state.
+# cd_api's lambda_function_name output -- cd-server's LambdaApiClient
+# calls that function directly via boto3, not over HTTP/VPC networking --
+# plus origin_secret_arn/kms_key_arn for CD_API_ORIGIN_SECRET (see the
+# service task definition's `secrets` below).
 data "terraform_remote_state" "cd_api" {
   backend = "s3"
   config = {
@@ -517,6 +517,21 @@ data "aws_iam_policy_document" "task_execution_secrets" {
     actions   = ["kms:Decrypt"]
     resources = [aws_kms_key.cd_server.arn]
   }
+
+  # CD_API_ORIGIN_SECRET (cd-platform#178's OriginGuard) -- owned by
+  # ../cd-api, which also hands the plaintext to API Gateway, so it's
+  # encrypted with that stack's key rather than cd_server's.
+  statement {
+    sid       = "ReadCdApiOriginSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [data.terraform_remote_state.cd_api.outputs.origin_secret_arn]
+  }
+
+  statement {
+    sid       = "DecryptCdApiOriginSecret"
+    actions   = ["kms:Decrypt"]
+    resources = [data.terraform_remote_state.cd_api.outputs.kms_key_arn]
+  }
 }
 
 resource "aws_iam_role_policy" "task_execution_secrets" {
@@ -735,7 +750,15 @@ resource "aws_ecs_task_definition" "cd_server" {
       environment = concat(local.cd_server_environment, [
         { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
       ])
-      secrets = local.cd_server_secrets
+      # CD_API_ORIGIN_SECRET: cd-server's OriginGuard (cd-platform#178)
+      # rejects any /v1 request whose X-Origin-Verify header doesn't match
+      # it, so /v1 is only reachable through API Gateway's key check, not
+      # directly via server.civicdog.com. Service task only -- the migrate
+      # task never serves requests. A cd-server image without #178 just
+      # ignores the variable.
+      secrets = concat(local.cd_server_secrets, [
+        { name = "CD_API_ORIGIN_SECRET", valueFrom = data.terraform_remote_state.cd_api.outputs.origin_secret_arn },
+      ])
 
       logConfiguration = {
         logDriver = "awslogs"

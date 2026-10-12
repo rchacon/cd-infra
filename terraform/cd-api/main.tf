@@ -67,6 +67,47 @@ resource "aws_secretsmanager_secret_version" "cd_api_app_db" {
   })
 }
 
+# --- Origin secret (API Gateway -> cd-server) ------------------------------
+
+# cd-platform#178 folds cd-api's code into cd-server (`cd.api`, mounted at
+# /v1). Once API Gateway's /v1 integration points at cd-server's ALB instead
+# of this Lambda, the same /v1 routes are also reachable straight through
+# server.civicdog.com -- skipping API Gateway's X-Api-Key check and usage
+# plan entirely. API Gateway will add this value as a static
+# X-Origin-Verify header on every request it forwards (a later PR, the
+# integration cutover), and cd-server's OriginGuard rejects any /v1 request
+# without it (CD_API_ORIGIN_SECRET, resolved from this secret by
+# ../cd-server's task definition).
+#
+# Lives here rather than in ../cd-server because this stack owns API
+# Gateway, which needs the plaintext at apply time; ../cd-server already
+# reads this stack's state and only needs the ARN. Plain string, not JSON --
+# the task definition injects the whole secret as one env var.
+resource "random_password" "origin_secret" {
+  length = 48
+  # Alphanumeric only -- it's embedded as a single-quoted static literal in
+  # API Gateway's integration request_parameters and sent as an HTTP header
+  # value, so no quoting/escaping concerns either way.
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "origin_secret" {
+  name       = "cd-platform/cd-api/origin-secret"
+  kms_key_id = aws_kms_key.cd_api.arn
+  # Regenerable (random_password), not hand-entered data -- same
+  # category as ../cd-server's own recovery_window_in_days = 0 secrets.
+  recovery_window_in_days = 0
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "origin_secret" {
+  secret_id     = aws_secretsmanager_secret.origin_secret.id
+  secret_string = random_password.origin_secret.result
+}
+
 # --- RDS Proxy ---------------------------------------------------------
 
 data "aws_iam_policy_document" "rds_proxy_assume_role" {

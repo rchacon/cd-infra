@@ -28,3 +28,13 @@ output "api_custom_domain_url" {
   description = "cd-api's custom domain base URL, v1 base path included."
   value       = "https://${aws_api_gateway_domain_name.cd_api.domain_name}/${local.api_base_path}"
 }
+
+output "origin_secret_arn" {
+  description = "Secrets Manager ARN of the API Gateway -> cd-server origin secret. ../cd-server injects it as CD_API_ORIGIN_SECRET; no consumer needs the plaintext outside this stack."
+  value       = aws_secretsmanager_secret.origin_secret.arn
+}
+
+output "kms_key_arn" {
+  description = "cd-api's KMS key, which encrypts origin_secret -- ../cd-server's task execution role needs kms:Decrypt on it to resolve CD_API_ORIGIN_SECRET."
+  value       = aws_kms_key.cd_api.arn
+}
