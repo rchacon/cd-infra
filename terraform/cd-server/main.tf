@@ -231,9 +231,12 @@ resource "aws_secretsmanager_secret_version" "cd_customers_readonly_db" {
 #
 # Lives here, encrypted with cd_server's own key, rather than in ../cd-api:
 # it's cd-server's secret, and ../cd-api's KMS key goes away with its
-# Lambda (cd-infra#76 part C). ../cd-api reads the plaintext from this
-# stack's `origin_secret` output for the header, so the dependency runs
-# from ../cd-api to here once part C drops this stack's read of ../cd-api.
+# Lambda (cd-infra#76 part C). At the cutover, ../cd-api reads the value
+# for the header with a data "aws_secretsmanager_secret_version" lookup by
+# this fixed name -- not through a remote-state output, which would make
+# the two stacks read each other's state (this one already reads
+# ../cd-api's) and put the plaintext in this stack's outputs too. Renaming
+# the secret means updating that lookup.
 # Plain string, not JSON -- the task definition injects the whole secret
 # as one env var.
 resource "random_password" "origin_secret" {
