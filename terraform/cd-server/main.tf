@@ -55,8 +55,10 @@ data "terraform_remote_state" "cd_webapp" {
 #
 data "aws_caller_identity" "current" {}
 
-# Customer-managed key (rather than the AWS-managed default), used only for
-# the ECS container instance's root EBS volume -- same defense-in-depth
+# Customer-managed key (rather than the AWS-managed default), used for the
+# ECS container instance's root EBS volume and this stack's Secrets
+# Manager secrets (both cd_customers credentials and the origin secret)
+# -- same defense-in-depth
 # reasoning as every other customer-managed key in this repo (see
 # CLAUDE.md), same flat ~$1/mo. Deliberately NOT used for the CloudWatch
 # log group below: CloudWatch Logs needs an explicit KMS *key policy*
@@ -124,7 +126,7 @@ data "aws_iam_policy_document" "cd_server_kms" {
 }
 
 resource "aws_kms_key" "cd_server" {
-  description             = "Encrypts the cd-server ECS container instance's root EBS volume and its cd_customers DB credentials secret."
+  description             = "Encrypts the cd-server ECS container instance's root EBS volume and its Secrets Manager secrets: the cd_customers app and read-only DB credentials, and the /v1 origin secret."
   deletion_window_in_days = 30
   enable_key_rotation     = true
   policy                  = data.aws_iam_policy_document.cd_server_kms.json
