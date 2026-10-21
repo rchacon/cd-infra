@@ -687,6 +687,17 @@ data "aws_iam_policy_document" "task_permissions" {
     )
   }
 
+  # Titan Text Embeddings V2 for cd.api's GET /v1/bills (cd-infra#76
+  # part A), which embeds the search query via cd.lib.bedrock.embed().
+  # The same grant ../cd-api's Lambda has (lambda_bedrock_permissions,
+  # #55): an on-demand model, so just the region-scoped foundation-model
+  # ARN, no inference profile.
+  statement {
+    sid       = "InvokeTitanEmbeddings"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/amazon.titan-embed-text-v2:0"]
+  }
+
   # ECS Exec (enable_execute_command below) -- same "no more manual
   # instance-hopping to debug" rationale cd-infra#24 used for Airflow's
   # planned task roles.
