@@ -27,3 +27,9 @@ output "cd_server_deploy_role_arn" {
   description = "ARN of the GitHub OIDC deploy role -- what a future cd-server-deploy.yml step would assume to call ecs:UpdateService/DescribeServices (see main.tf's comment on why that workflow step isn't wired up yet)."
   value       = aws_iam_role.cd_server_deploy.arn
 }
+
+output "origin_secret" {
+  description = "The API Gateway -> cd-server origin secret's plaintext. ../cd-api's /v1 integration sends it as the X-Origin-Verify header (the cutover, cd-infra#76 part B)."
+  value       = random_password.origin_secret.result
+  sensitive   = true
+}

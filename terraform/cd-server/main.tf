@@ -217,6 +217,50 @@ resource "aws_secretsmanager_secret_version" "cd_customers_readonly_db" {
   })
 }
 
+# --- Origin secret (API Gateway -> cd-server) ------------------------------
+#
+# cd-platform#178 folds cd-api's code into cd-server (`cd.api`, mounted at
+# /v1). Once API Gateway's /v1 integration points at this ALB instead of
+# ../cd-api's Lambda, the same /v1 routes are also reachable straight
+# through server.civicdog.com -- skipping API Gateway's X-Api-Key check and
+# usage plan entirely. API Gateway will add this value as a static
+# X-Origin-Verify header on every request it forwards (the integration
+# cutover, a later PR in ../cd-api), and cd-server's OriginGuard rejects
+# any /v1 request without it (CD_API_ORIGIN_SECRET, injected into the
+# service task below).
+#
+# Lives here, encrypted with cd_server's own key, rather than in ../cd-api:
+# it's cd-server's secret, and ../cd-api's KMS key goes away with its
+# Lambda (cd-infra#76 part C). ../cd-api reads the plaintext from this
+# stack's `origin_secret` output for the header, so the dependency runs
+# from ../cd-api to here once part C drops this stack's read of ../cd-api.
+# Plain string, not JSON -- the task definition injects the whole secret
+# as one env var.
+resource "random_password" "origin_secret" {
+  length = 48
+  # Alphanumeric only -- it's embedded as a single-quoted static literal in
+  # API Gateway's integration request_parameters and sent as an HTTP header
+  # value, so no quoting/escaping concerns either way.
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "origin_secret" {
+  name       = "cd-platform/cd-server/origin-secret"
+  kms_key_id = aws_kms_key.cd_server.arn
+  # Regenerable (random_password), not hand-entered data -- same category
+  # as cd_server_app_db's recovery_window_in_days = 0 above.
+  recovery_window_in_days = 0
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "origin_secret" {
+  secret_id     = aws_secretsmanager_secret.origin_secret.id
+  secret_string = random_password.origin_secret.result
+}
+
 # --- Logs -------------------------------------------------------------------
 
 resource "aws_cloudwatch_log_group" "cd_server" {
