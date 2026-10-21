@@ -556,6 +556,14 @@ data "aws_iam_policy_document" "task_execution_secrets" {
     resources = [aws_secretsmanager_secret.cd_server_app_db.arn]
   }
 
+  # CD_API_ORIGIN_SECRET (cd-platform#178's OriginGuard). Encrypted with
+  # cd_server's key, so DecryptCdServerSecrets below already covers it.
+  statement {
+    sid       = "ReadOriginSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [aws_secretsmanager_secret.origin_secret.arn]
+  }
+
   statement {
     sid       = "DecryptCdServerSecrets"
     actions   = ["kms:Decrypt"]
@@ -779,7 +787,15 @@ resource "aws_ecs_task_definition" "cd_server" {
       environment = concat(local.cd_server_environment, [
         { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
       ])
-      secrets = local.cd_server_secrets
+      # CD_API_ORIGIN_SECRET: cd-server's OriginGuard (cd-platform#178)
+      # rejects any /v1 request whose X-Origin-Verify header doesn't match
+      # it, so /v1 is only reachable through API Gateway's key check, not
+      # directly via server.civicdog.com. Service task only -- the migrate
+      # task never serves requests. A cd-server image without #178 just
+      # ignores the variable.
+      secrets = concat(local.cd_server_secrets, [
+        { name = "CD_API_ORIGIN_SECRET", valueFrom = aws_secretsmanager_secret.origin_secret.arn },
+      ])
 
       logConfiguration = {
         logDriver = "awslogs"
