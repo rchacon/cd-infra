@@ -553,18 +553,20 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
 # below at task launch -- needs read access to cd-server's own DB
 # credentials secret plus decrypt on the KMS key protecting it.
 data "aws_iam_policy_document" "task_execution_secrets" {
+  # origin_secret is CD_API_ORIGIN_SECRET (cd-platform#178's OriginGuard),
+  # encrypted with cd_server's key like the DB secret, so
+  # DecryptCdServerSecrets below covers both. This execution role is
+  # shared with cd_server_migrate, so that task's role could read the
+  # origin secret too, though only the service task definition injects
+  # it. A separate migrate execution role isn't worth it for one secret
+  # whose value is also in API Gateway's config.
   statement {
-    sid       = "ReadCdServerDbSecret"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [aws_secretsmanager_secret.cd_server_app_db.arn]
-  }
-
-  # CD_API_ORIGIN_SECRET (cd-platform#178's OriginGuard). Encrypted with
-  # cd_server's key, so DecryptCdServerSecrets below already covers it.
-  statement {
-    sid       = "ReadOriginSecret"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [aws_secretsmanager_secret.origin_secret.arn]
+    sid     = "ReadCdServerSecrets"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      aws_secretsmanager_secret.cd_server_app_db.arn,
+      aws_secretsmanager_secret.origin_secret.arn,
+    ]
   }
 
   statement {
