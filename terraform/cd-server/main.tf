@@ -55,8 +55,10 @@ data "terraform_remote_state" "cd_webapp" {
 #
 data "aws_caller_identity" "current" {}
 
-# Customer-managed key (rather than the AWS-managed default), used only for
-# the ECS container instance's root EBS volume -- same defense-in-depth
+# Customer-managed key (rather than the AWS-managed default), used for the
+# ECS container instance's root EBS volume and this stack's Secrets
+# Manager secrets (both cd_customers credentials and the origin secret)
+# -- same defense-in-depth
 # reasoning as every other customer-managed key in this repo (see
 # CLAUDE.md), same flat ~$1/mo. Deliberately NOT used for the CloudWatch
 # log group below: CloudWatch Logs needs an explicit KMS *key policy*
@@ -124,7 +126,7 @@ data "aws_iam_policy_document" "cd_server_kms" {
 }
 
 resource "aws_kms_key" "cd_server" {
-  description             = "Encrypts the cd-server ECS container instance's root EBS volume and its cd_customers DB credentials secret."
+  description             = "Encrypts the cd-server ECS container instance's root EBS volume and its Secrets Manager secrets: the cd_customers app and read-only DB credentials, and the /v1 origin secret."
   deletion_window_in_days = 30
   enable_key_rotation     = true
   policy                  = data.aws_iam_policy_document.cd_server_kms.json
@@ -215,6 +217,53 @@ resource "aws_secretsmanager_secret_version" "cd_customers_readonly_db" {
     username = var.cd_customers_readonly_username
     password = random_password.cd_customers_readonly.result
   })
+}
+
+# --- Origin secret (API Gateway -> cd-server) ------------------------------
+#
+# cd-platform#178 folds cd-api's code into cd-server (`cd.api`, mounted at
+# /v1). Once API Gateway's /v1 integration points at this ALB instead of
+# ../cd-api's Lambda, the same /v1 routes are also reachable straight
+# through server.civicdog.com -- skipping API Gateway's X-Api-Key check and
+# usage plan entirely. API Gateway will add this value as a static
+# X-Origin-Verify header on every request it forwards (the integration
+# cutover, a later PR in ../cd-api), and cd-server's OriginGuard rejects
+# any /v1 request without it (CD_API_ORIGIN_SECRET, injected into the
+# service task below).
+#
+# Lives here, encrypted with cd_server's own key, rather than in ../cd-api:
+# it's cd-server's secret, and ../cd-api's KMS key goes away with its
+# Lambda (cd-infra#76 part C). At the cutover, ../cd-api reads the value
+# for the header with a data "aws_secretsmanager_secret_version" lookup by
+# this fixed name -- not through a remote-state output, which would make
+# the two stacks read each other's state (this one already reads
+# ../cd-api's) and put the plaintext in this stack's outputs too. Renaming
+# the secret means updating that lookup.
+# Plain string, not JSON -- the task definition injects the whole secret
+# as one env var.
+resource "random_password" "origin_secret" {
+  length = 48
+  # Alphanumeric only -- it's embedded as a single-quoted static literal in
+  # API Gateway's integration request_parameters and sent as an HTTP header
+  # value, so no quoting/escaping concerns either way.
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "origin_secret" {
+  name       = "cd-platform/cd-server/origin-secret"
+  kms_key_id = aws_kms_key.cd_server.arn
+  # Regenerable (random_password), not hand-entered data -- same category
+  # as cd_server_app_db's recovery_window_in_days = 0 above.
+  recovery_window_in_days = 0
+
+  tags = {
+    Project = "cd-platform"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "origin_secret" {
+  secret_id     = aws_secretsmanager_secret.origin_secret.id
+  secret_string = random_password.origin_secret.result
 }
 
 # --- Logs -------------------------------------------------------------------
@@ -506,10 +555,20 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
 # below at task launch -- needs read access to cd-server's own DB
 # credentials secret plus decrypt on the KMS key protecting it.
 data "aws_iam_policy_document" "task_execution_secrets" {
+  # origin_secret is CD_API_ORIGIN_SECRET (cd-platform#178's OriginGuard),
+  # encrypted with cd_server's key like the DB secret, so
+  # DecryptCdServerSecrets below covers both. This execution role is
+  # shared with cd_server_migrate, so that task's role could read the
+  # origin secret too, though only the service task definition injects
+  # it. A separate migrate execution role isn't worth it for one secret
+  # whose value is also in API Gateway's config.
   statement {
-    sid       = "ReadCdServerDbSecret"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [aws_secretsmanager_secret.cd_server_app_db.arn]
+    sid     = "ReadCdServerSecrets"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      aws_secretsmanager_secret.cd_server_app_db.arn,
+      aws_secretsmanager_secret.origin_secret.arn,
+    ]
   }
 
   statement {
@@ -735,7 +794,15 @@ resource "aws_ecs_task_definition" "cd_server" {
       environment = concat(local.cd_server_environment, [
         { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
       ])
-      secrets = local.cd_server_secrets
+      # CD_API_ORIGIN_SECRET: cd-server's OriginGuard (cd-platform#178)
+      # rejects any /v1 request whose X-Origin-Verify header doesn't match
+      # it, so /v1 is only reachable through API Gateway's key check, not
+      # directly via server.civicdog.com. Service task only -- the migrate
+      # task never serves requests. A cd-server image without #178 just
+      # ignores the variable.
+      secrets = concat(local.cd_server_secrets, [
+        { name = "CD_API_ORIGIN_SECRET", valueFrom = aws_secretsmanager_secret.origin_secret.arn },
+      ])
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -922,7 +989,20 @@ resource "aws_ecs_service" "cd_server" {
   # without this, Terraform could create the service before the listener
   # (and therefore the target group's association with a live ALB) is
   # ready.
-  depends_on = [aws_lb_listener.https]
+  #
+  # The task definition's `secrets` reference only the parent
+  # aws_secretsmanager_secret ARNs, so without the other two entries
+  # Terraform could roll the service to a new revision before the
+  # secret's AWSCURRENT version exists, or before the execution role's
+  # inline policy grants reading it. The new task would then fail with
+  # ResourceInitializationError and the circuit breaker would roll back,
+  # while the apply still reported success. Same race the launch
+  # template's depends_on above guards against.
+  depends_on = [
+    aws_lb_listener.https,
+    aws_secretsmanager_secret_version.origin_secret,
+    aws_iam_role_policy.task_execution_secrets,
+  ]
 
   tags = {
     Project = "cd-platform"
