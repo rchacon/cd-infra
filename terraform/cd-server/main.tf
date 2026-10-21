@@ -982,7 +982,20 @@ resource "aws_ecs_service" "cd_server" {
   # without this, Terraform could create the service before the listener
   # (and therefore the target group's association with a live ALB) is
   # ready.
-  depends_on = [aws_lb_listener.https]
+  #
+  # The task definition's `secrets` reference only the parent
+  # aws_secretsmanager_secret ARNs, so without the other two entries
+  # Terraform could roll the service to a new revision before the
+  # secret's AWSCURRENT version exists, or before the execution role's
+  # inline policy grants reading it. The new task would then fail with
+  # ResourceInitializationError and the circuit breaker would roll back,
+  # while the apply still reported success. Same race the launch
+  # template's depends_on above guards against.
+  depends_on = [
+    aws_lb_listener.https,
+    aws_secretsmanager_secret_version.origin_secret,
+    aws_iam_role_policy.task_execution_secrets,
+  ]
 
   tags = {
     Project = "cd-platform"
