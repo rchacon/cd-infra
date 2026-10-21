@@ -7,10 +7,10 @@ data "terraform_remote_state" "networking" {
   }
 }
 
-# Only for cd_api's lambda_function_name output -- cd-server's
-# LambdaApiClient calls that function directly via boto3, not over
-# HTTP/VPC networking, so this is the one thing this module needs from
-# ../cd-api's state.
+# cd_api's lambda_function_name output -- cd-server's LambdaApiClient
+# calls that function directly via boto3, not over HTTP/VPC networking --
+# plus openapi_spec_bucket_name for the deploy role's openapi.json
+# publish (cd-infra#76 part A).
 data "terraform_remote_state" "cd_api" {
   backend = "s3"
   config = {
@@ -1212,6 +1212,17 @@ data "aws_iam_policy_document" "cd_server_deploy_permissions" {
     sid       = "DescribeMigrationTasks"
     actions   = ["ecs:DescribeTasks"]
     resources = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.cd_server.name}/*"]
+  }
+
+  # cd-infra#76 part A: cd-platform#179 moves the openapi.json publish
+  # (for docs.civicdog.com's API reference) from cd-api-deploy.yml into
+  # cd-server-deploy.yml. Same single-key scope as ../cd-api's
+  # cd_api_deploy_openapi_publish. The bucket stays in ../cd-api, so its
+  # name comes from that stack's state.
+  statement {
+    sid       = "PublishOpenApiSpec"
+    actions   = ["s3:PutObject"]
+    resources = ["arn:aws:s3:::${data.terraform_remote_state.cd_api.outputs.openapi_spec_bucket_name}/openapi.json"]
   }
 
   # RunTask requires PassRole for the roles it hands the task.
