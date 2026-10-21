@@ -982,6 +982,94 @@ resource "aws_lb_listener" "https" {
   }
 }
 
+# /v1 requires the origin secret at the ALB too, not only in cd-server's
+# OriginGuard (cd-platform#178), so a regression in the app can't open
+# /v1 to callers that skipped API Gateway's X-Api-Key check. ALB rule
+# conditions only AND together and can't be negated, so it takes a forward
+# rule for /v1 with the matching X-Origin-Verify header, then 403 rules
+# for any other /v1 request. Everything else (/graphql, /health, ...) falls
+# through to the listener's default forward.
+#
+# ALB header matching is case-insensitive; OriginGuard still does the
+# exact comparison. Rotating random_password.origin_secret updates these
+# rules in the same apply, but running tasks only pick up the new
+# CD_API_ORIGIN_SECRET on a redeploy -- /v1 returns OriginGuard's 403
+# until then.
+locals {
+  v1_path_patterns = ["/v1", "/v1/*"]
+}
+
+resource "aws_lb_listener_rule" "v1_from_api_gateway" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 10
+
+  condition {
+    path_pattern {
+      values = local.v1_path_patterns
+    }
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = [random_password.origin_secret.result]
+    }
+  }
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.cd_server.arn
+  }
+}
+
+# The 403 bodies match OriginGuard's own: a JSON:API error document under
+# the JSON:API namespaces (cd.api's jsonapi.is_jsonapi_path), problem+json
+# everywhere else, so a client parses the same shape whichever layer
+# rejects it. Only the Content-Type differs: an ALB fixed response allows
+# just a few types, so both send application/json rather than
+# OriginGuard's application/vnd.api+json / application/problem+json.
+resource "aws_lb_listener_rule" "v1_jsonapi_direct_forbidden" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 20
+
+  condition {
+    path_pattern {
+      values = ["/v1/members", "/v1/members/*", "/v1/bills", "/v1/bills/*"]
+    }
+  }
+
+  action {
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "application/json"
+      message_body = jsonencode({ errors = [{ status = "403", title = "Forbidden", detail = "Forbidden." }] })
+      status_code  = "403"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "v1_direct_forbidden" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 30
+
+  condition {
+    path_pattern {
+      values = local.v1_path_patterns
+    }
+  }
+
+  action {
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "application/json"
+      message_body = jsonencode({ type = "about:blank", title = "Forbidden", status = 403, detail = "Forbidden." })
+      status_code  = "403"
+    }
+  }
+}
+
 resource "aws_lb_listener" "http_redirect" {
   load_balancer_arn = aws_lb.cd_server.arn
   port              = 80
