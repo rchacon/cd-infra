@@ -24,6 +24,21 @@ data "aws_lambda_function" "cd_api" {
   function_name = data.terraform_remote_state.cd_api.outputs.lambda_function_name
 }
 
+# cd-infra#76 part A: cd.api (cd-platform#178, mounted at /v1) queries
+# cd_platform as the same cd_api_app role ../cd-api's Lambda uses, so the
+# service task reads that stack's existing credentials secret. Looked up
+# by name rather than through new ../cd-api outputs, so this needs no
+# ../cd-api apply. Both move into this stack, onto cd_server's key, in
+# part C, once the Lambda and RDS Proxy that also read them are gone; then
+# ../cd-api's KMS key can be deleted.
+data "aws_secretsmanager_secret" "cd_api_app_db" {
+  name = "cd-platform/cd-api/cd-api-db-credentials"
+}
+
+data "aws_kms_alias" "cd_api" {
+  name = "alias/cd-platform-cd-api"
+}
+
 # cd-infra#48: cd-server's own cd_customers database lives on this same
 # RDS instance -- rds_address to connect, master_user_secret_arn (used
 # only transiently, by the ECS instance's boot-time bootstrap below) to
@@ -571,6 +586,21 @@ data "aws_iam_policy_document" "task_execution_secrets" {
     ]
   }
 
+  # CD_API_PGUSER/CD_API_PGPASSWORD (cd-infra#76 part A) -- ../cd-api's
+  # cd_api_app credentials, still encrypted with that stack's key until
+  # part C moves the secret here.
+  statement {
+    sid       = "ReadCdApiDbSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [data.aws_secretsmanager_secret.cd_api_app_db.arn]
+  }
+
+  statement {
+    sid       = "DecryptCdApiDbSecret"
+    actions   = ["kms:Decrypt"]
+    resources = [data.aws_kms_alias.cd_api.target_key_arn]
+  }
+
   statement {
     sid       = "DecryptCdServerSecrets"
     actions   = ["kms:Decrypt"]
@@ -791,17 +821,29 @@ resource "aws_ecs_task_definition" "cd_server" {
         }
       ]
 
+      # CD_API_PG* (cd-infra#76 part A): cd.api's own connection to
+      # cd_platform, separate from cd-server's PG* (cd_customers). Straight
+      # to the RDS instance, not ../cd-api's RDS Proxy, which goes away in
+      # part C -- cd.api keeps its own small asyncpg pool. Service task
+      # only, like CD_API_ORIGIN_SECRET below: the migrate task never
+      # serves /v1. Until cd-platform#178 is released, nothing reads these.
       environment = concat(local.cd_server_environment, [
         { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
+        { name = "CD_API_PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
+        { name = "CD_API_PGPORT", value = "5432" },
+        { name = "CD_API_PGDATABASE", value = var.cd_platform_db_name },
       ])
       # CD_API_ORIGIN_SECRET: cd-server's OriginGuard (cd-platform#178)
       # rejects any /v1 request whose X-Origin-Verify header doesn't match
       # it, so /v1 is only reachable through API Gateway's key check, not
       # directly via server.civicdog.com. Service task only -- the migrate
       # task never serves requests. A cd-server image without #178 just
-      # ignores the variable.
+      # ignores the variable. CD_API_PGUSER/CD_API_PGPASSWORD complete the
+      # CD_API_PG* settings above.
       secrets = concat(local.cd_server_secrets, [
         { name = "CD_API_ORIGIN_SECRET", valueFrom = aws_secretsmanager_secret.origin_secret.arn },
+        { name = "CD_API_PGUSER", valueFrom = "${data.aws_secretsmanager_secret.cd_api_app_db.arn}:username::" },
+        { name = "CD_API_PGPASSWORD", valueFrom = "${data.aws_secretsmanager_secret.cd_api_app_db.arn}:password::" },
       ])
 
       logConfiguration = {
