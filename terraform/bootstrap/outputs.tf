@@ -18,3 +18,13 @@ output "github_oidc_provider_arn" {
   description = "ARN of the GitHub Actions OIDC provider. Consumed by #4 (cd-api)'s deploy IAM role trust policy, and reusable by any future component's deploy workflow."
   value       = aws_iam_openid_connect_provider.github_actions.arn
 }
+
+# Not consumed by any other terraform/ directory -- this is purely for a
+# human to add a scoped `sts:AssumeRole` statement (Resource = this ARN)
+# to cd-terraform's own Console-managed policy (see CLAUDE.md's IAM
+# section), then assume it on demand, e.g.:
+#   aws sts assume-role --role-arn <this> --role-session-name observability
+output "observability_readonly_role_arn" {
+  description = "ARN of the read-only CloudTrail/CloudWatch/Cost Explorer role, for investigating AWS usage/billing questions. Not usable until an identity's own policy grants it sts:AssumeRole on this ARN."
+  value       = aws_iam_role.observability_readonly.arn
+}
