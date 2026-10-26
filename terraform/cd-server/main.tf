@@ -850,11 +850,20 @@ resource "aws_ecs_task_definition" "cd_server" {
       # part C -- cd.api keeps its own small asyncpg pool. Service task
       # only, like CD_API_ORIGIN_SECRET below: the migrate task never
       # serves /v1. Until cd-platform#178 is released, nothing reads these.
+      # Once cd-platform#195 ships, cd-server fails at startup without
+      # CD_API_PGHOST: its GraphQL resolvers read cd_platform through the
+      # same pool.
+      #
+      # CD_API_PG_POOL_SIZE: per task, shared by external /v1 traffic and
+      # those resolvers. Matches cd.api's default; set here so the
+      # connection budget against RDS's max_connections is visible in
+      # one place.
       environment = concat(local.cd_server_environment, [
         { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
         { name = "CD_API_PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
         { name = "CD_API_PGPORT", value = "5432" },
         { name = "CD_API_PGDATABASE", value = var.cd_platform_db_name },
+        { name = "CD_API_PG_POOL_SIZE", value = "10" },
       ])
       # CD_API_ORIGIN_SECRET: cd-server's OriginGuard (cd-platform#178)
       # rejects any /v1 request whose X-Origin-Verify header doesn't match
