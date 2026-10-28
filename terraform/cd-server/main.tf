@@ -153,18 +153,6 @@ resource "random_password" "cd_server_app" {
   # SQL-quoting escaping entirely rather than getting it right for an
   # arbitrary character set.
   special = false
-
-  # A replacement changes the value, and every place that has to match it
-  # (API Gateway's header in ../cd-api, this stack's ALB rule once /v1's
-  # origin check lands there, running tasks' CD_API_ORIGIN_SECRET) picks
-  # it up at a different time, so keyed /v1 callers get 403s in between.
-  # This makes an accidental replacement -- a changed argument, a rename
-  # without a `moved` block -- fail the plan instead of slipping through
-  # as one "must be replaced" line. A deliberate rotation removes this
-  # first; see CLAUDE.md.
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 resource "aws_secretsmanager_secret" "cd_server_app_db" {
@@ -211,18 +199,6 @@ resource "aws_secretsmanager_secret_version" "cd_server_app_db" {
 resource "random_password" "cd_customers_readonly" {
   length  = 32
   special = false
-
-  # A replacement changes the value, and every place that has to match it
-  # (API Gateway's header in ../cd-api, this stack's ALB rule once /v1's
-  # origin check lands there, running tasks' CD_API_ORIGIN_SECRET) picks
-  # it up at a different time, so keyed /v1 callers get 403s in between.
-  # This makes an accidental replacement -- a changed argument, a rename
-  # without a `moved` block -- fail the plan instead of slipping through
-  # as one "must be replaced" line. A deliberate rotation removes this
-  # first; see CLAUDE.md.
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 resource "aws_secretsmanager_secret" "cd_customers_readonly_db" {
