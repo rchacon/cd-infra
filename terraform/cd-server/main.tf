@@ -958,8 +958,10 @@ resource "aws_lb" "cd_server" {
   # it run uvicorn's 5s default), must stay above this. Otherwise the
   # ALB reuses a connection uvicorn just closed and answers with its own
   # CORS-less 502, which cd-webapp shows as "Could not reach the lookup
-  # service". Raise both together. A request running
-  # longer than this gets the ALB's 504.
+  # service". The two deploy separately, so order the change: to raise
+  # this, release cd-server with the higher keep-alive first, then apply;
+  # to lower the keep-alive, apply the lower idle_timeout first. A request
+  # running longer than this gets the ALB's 504.
   idle_timeout = 60
 
   tags = {
