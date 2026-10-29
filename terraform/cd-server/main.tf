@@ -952,6 +952,15 @@ resource "aws_lb" "cd_server" {
   # the target -- guards against header-smuggling-style abuse.
   drop_invalid_header_fields = true
 
+  # Explicit (it's the default) because cd-server depends on it: uvicorn's
+  # keep-alive, UVICORN_TIMEOUT_KEEP_ALIVE in cd-platform's
+  # cd-server/docker/Dockerfile (65), must stay above this. Otherwise the
+  # ALB reuses a connection uvicorn just closed and answers with its own
+  # CORS-less 502, which cd-webapp shows as "Could not reach the lookup
+  # service" (cd-platform#197). Raise both together. A request running
+  # longer than this gets the ALB's 504.
+  idle_timeout = 60
+
   tags = {
     Project = "cd-platform"
   }
