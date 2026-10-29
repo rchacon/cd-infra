@@ -84,15 +84,15 @@ variable "container_memory" {
   default     = 400
 }
 
-# Matches cd-server/src/cd/server/settings.py's own PGDATABASE default --
-# keeping this default in sync means a real deployment never needs an
-# explicit override.
 variable "cd_platform_db_name" {
   description = "Name of cd-etl's database on RDS, which cd.api (cd-platform#178, mounted at /v1) reads as CD_API_PGDATABASE. cd.api's own default is the local-dev name congressional_app, so this must be set explicitly."
   type        = string
   default     = "cd_platform"
 }
 
+# Matches cd-server/src/cd/server/settings.py's own PGDATABASE default --
+# keeping this default in sync means a real deployment never needs an
+# explicit override.
 variable "cd_customers_db_name" {
   description = "Name of the sibling database on RDS holding cd-server's own customer data. Created idempotently by the ECS instance's first-boot bootstrap (RDS has no docker-entrypoint-initdb.d equivalent), same pattern as ../airflow's airflow_metadata_db_name."
   type        = string
