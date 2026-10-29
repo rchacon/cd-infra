@@ -985,9 +985,22 @@ resource "aws_lb_listener" "https" {
   ssl_policy      = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn = aws_acm_certificate_validation.server_domain.certificate_arn
 
+  # Allow-list: only the paths cd-server actually serves publicly are
+  # forwarded (the rules below); anything else gets a 404 here, before it
+  # reaches the app. ALB path patterns match the raw request path, but
+  # uvicorn percent-decodes it before Starlette routes it, so a deny-list
+  # could be sidestepped with an encoded path like /%761/members -- with an
+  # allow-list, an encoded or unknown path never matches a forward rule.
+  # (Target-group health checks go straight to the tasks and skip listener
+  # rules, so /health's own rule is only for outside callers.)
   default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.cd_server.arn
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "application/json"
+      message_body = jsonencode({ type = "about:blank", title = "Not Found", status = 404, detail = "Not Found." })
+      status_code  = "404"
+    }
   }
 }
 
@@ -996,8 +1009,9 @@ resource "aws_lb_listener" "https" {
 # /v1 to callers that skipped API Gateway's X-Api-Key check. ALB rule
 # conditions only AND together and can't be negated, so it takes a forward
 # rule for /v1 with the matching X-Origin-Verify header, then 403 rules
-# for any other /v1 request. Everything else (/graphql, /health, ...) falls
-# through to the listener's default forward.
+# for any other /v1 request. The rest of cd-server's public paths get
+# their own forward rule (cd_server_public_paths); everything else hits
+# the listener's default 404.
 #
 # ALB header matching is case-insensitive; OriginGuard still does the
 # exact comparison. Rotating random_password.origin_secret updates these
@@ -1031,33 +1045,33 @@ resource "aws_lb_listener_rule" "v1_from_api_gateway" {
   }
 }
 
-# The 403 bodies match OriginGuard's own: a JSON:API error document under
-# the JSON:API namespaces (cd.api's jsonapi.is_jsonapi_path), problem+json
-# everywhere else, so a client parses the same shape whichever layer
-# rejects it. Only the Content-Type differs: an ALB fixed response allows
-# just a few types, so both send application/json rather than
-# OriginGuard's application/vnd.api+json / application/problem+json.
-resource "aws_lb_listener_rule" "v1_jsonapi_direct_forbidden" {
+# cd-server's public paths outside /v1: cd-webapp's GraphQL endpoint and
+# the two plain REST endpoints (cd-server/src/cd/server/app.py). A new
+# top-level route needs adding here, or the ALB 404s it -- failing closed.
+# Exact paths: the outer app's own /docs and /openapi.json stay unreachable.
+resource "aws_lb_listener_rule" "cd_server_public_paths" {
   listener_arn = aws_lb_listener.https.arn
   priority     = 20
 
   condition {
     path_pattern {
-      values = ["/v1/members", "/v1/members/*", "/v1/bills", "/v1/bills/*"]
+      values = ["/graphql", "/health", "/version"]
     }
   }
 
   action {
-    type = "fixed-response"
-
-    fixed_response {
-      content_type = "application/json"
-      message_body = jsonencode({ errors = [{ status = "403", title = "Forbidden", detail = "Forbidden." }] })
-      status_code  = "403"
-    }
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.cd_server.arn
   }
 }
 
+# One body for every /v1 path, problem+json-shaped (cd-server-deploy.yml's
+# direct-/v1 check reads its `status`). OriginGuard sends a JSON:API error
+# document under cd.api's JSON:API namespaces instead; matching that here
+# would mean copying cd.api's route list into this rule. Only callers that
+# skip API Gateway ever see this response. An ALB fixed response allows
+# just a few content types, so it's application/json rather than
+# application/problem+json.
 resource "aws_lb_listener_rule" "v1_direct_forbidden" {
   listener_arn = aws_lb_listener.https.arn
   priority     = 30
