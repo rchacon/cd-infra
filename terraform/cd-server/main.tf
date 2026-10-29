@@ -1028,7 +1028,7 @@ resource "aws_lb_listener" "https" {
 
     fixed_response {
       content_type = "application/json"
-      message_body = jsonencode({ type = "about:blank", title = "Not Found", status = 404, detail = "Not Found." })
+      message_body = local.problem_bodies["404"]
       status_code  = "404"
     }
   }
@@ -1050,6 +1050,14 @@ resource "aws_lb_listener" "https" {
 # until then.
 locals {
   v1_path_patterns = ["/v1", "/v1/*"]
+
+  # problem+json bodies for the listener's fixed responses (the default 404
+  # and v1_direct_forbidden's 403), so the two can't drift apart.
+  # cd-server-deploy.yml's direct-/v1 check reads `status`.
+  problem_bodies = {
+    for status, title in { "403" = "Forbidden", "404" = "Not Found" } :
+    status => jsonencode({ type = "about:blank", title = title, status = tonumber(status), detail = "${title}." })
+  }
 }
 
 resource "aws_lb_listener_rule" "v1_from_api_gateway" {
@@ -1121,7 +1129,7 @@ resource "aws_lb_listener_rule" "v1_direct_forbidden" {
 
     fixed_response {
       content_type = "application/json"
-      message_body = jsonencode({ type = "about:blank", title = "Forbidden", status = 403, detail = "Forbidden." })
+      message_body = local.problem_bodies["403"]
       status_code  = "403"
     }
   }
