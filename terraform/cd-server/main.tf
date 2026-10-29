@@ -7,10 +7,10 @@ data "terraform_remote_state" "networking" {
   }
 }
 
-# Only for cd_api's lambda_function_name output -- cd-server's
-# LambdaApiClient calls that function directly via boto3, not over
-# HTTP/VPC networking, so this is the one thing this module needs from
-# ../cd-api's state.
+# cd_api's lambda_function_name output -- cd-server's LambdaApiClient
+# calls that function directly via boto3, not over HTTP/VPC networking --
+# plus openapi_spec_bucket_name for the deploy role's openapi.json
+# publish (cd-infra#76 part A).
 data "terraform_remote_state" "cd_api" {
   backend = "s3"
   config = {
@@ -22,6 +22,21 @@ data "terraform_remote_state" "cd_api" {
 
 data "aws_lambda_function" "cd_api" {
   function_name = data.terraform_remote_state.cd_api.outputs.lambda_function_name
+}
+
+# cd-infra#76 part A: cd.api (cd-platform#178, mounted at /v1) queries
+# cd_platform as the same cd_api_app role ../cd-api's Lambda uses, so the
+# service task reads that stack's existing credentials secret. Looked up
+# by name rather than through new ../cd-api outputs, so this needs no
+# ../cd-api apply. Both move into this stack, onto cd_server's key, in
+# part C, once the Lambda and RDS Proxy that also read them are gone; then
+# ../cd-api's KMS key can be deleted.
+data "aws_secretsmanager_secret" "cd_api_app_db" {
+  name = "cd-platform/cd-api/cd-api-db-credentials"
+}
+
+data "aws_kms_alias" "cd_api" {
+  name = "alias/cd-platform-cd-api"
 }
 
 # cd-infra#48: cd-server's own cd_customers database lives on this same
@@ -36,6 +51,14 @@ data "terraform_remote_state" "rds" {
     key    = "rds/terraform.tfstate"
     region = var.aws_region
   }
+}
+
+# The instance itself, for its initial database's name (cd-etl's
+# cd_platform, which cd.api reads as CD_API_PGDATABASE) -- read from the
+# instance rather than repeated here, so it can't drift from ../rds's
+# db_name. ../rds has no output for it, and this avoids an apply there.
+data "aws_db_instance" "cd_platform" {
+  db_instance_identifier = data.terraform_remote_state.rds.outputs.rds_instance_identifier
 }
 
 # cd-infra#48: cd-server's Cognito JWT verification (settings.py's
@@ -583,6 +606,21 @@ data "aws_iam_policy_document" "task_execution_secrets" {
     ]
   }
 
+  # CD_API_PGUSER/CD_API_PGPASSWORD (cd-infra#76 part A) -- ../cd-api's
+  # cd_api_app credentials, still encrypted with that stack's key until
+  # part C moves the secret here.
+  statement {
+    sid       = "ReadCdApiDbSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [data.aws_secretsmanager_secret.cd_api_app_db.arn]
+  }
+
+  statement {
+    sid       = "DecryptCdApiDbSecret"
+    actions   = ["kms:Decrypt"]
+    resources = [data.aws_kms_alias.cd_api.target_key_arn]
+  }
+
   statement {
     sid       = "DecryptCdServerSecrets"
     actions   = ["kms:Decrypt"]
@@ -655,6 +693,17 @@ data "aws_iam_policy_document" "task_permissions" {
       [for region in local.bedrock_chat_profile_regions :
       "arn:aws:bedrock:${region}::foundation-model/${trimprefix(local.bedrock_chat_profile_id, "us.")}"],
     )
+  }
+
+  # Titan Text Embeddings V2 for cd.api's GET /v1/bills (cd-infra#76
+  # part A), which embeds the search query via cd.lib.bedrock.embed().
+  # The same grant ../cd-api's Lambda has (lambda_bedrock_permissions,
+  # #55): an on-demand model, so just the region-scoped foundation-model
+  # ARN, no inference profile.
+  statement {
+    sid       = "InvokeTitanEmbeddings"
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/amazon.titan-embed-text-v2:0"]
   }
 
   # ECS Exec (enable_execute_command below) -- same "no more manual
@@ -803,17 +852,38 @@ resource "aws_ecs_task_definition" "cd_server" {
         }
       ]
 
+      # CD_API_PG* (cd-infra#76 part A): cd.api's own connection to
+      # cd_platform, separate from cd-server's PG* (cd_customers). Straight
+      # to the RDS instance, not ../cd-api's RDS Proxy, which goes away in
+      # part C -- cd.api keeps its own small asyncpg pool. Service task
+      # only, like CD_API_ORIGIN_SECRET below: the migrate task never
+      # serves /v1. Until cd-platform#178 is released, nothing reads these.
+      # Once cd-platform#195 ships, cd-server fails at startup without
+      # CD_API_PGHOST: its GraphQL resolvers read cd_platform through the
+      # same pool.
+      #
+      # CD_API_PG_POOL_SIZE: per task, shared by external /v1 traffic and
+      # those resolvers. Matches cd.api's default; set here so the
+      # connection budget against RDS's max_connections is visible in
+      # one place.
       environment = concat(local.cd_server_environment, [
         { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
+        { name = "CD_API_PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
+        { name = "CD_API_PGPORT", value = "5432" },
+        { name = "CD_API_PGDATABASE", value = data.aws_db_instance.cd_platform.db_name },
+        { name = "CD_API_PG_POOL_SIZE", value = "10" },
       ])
       # CD_API_ORIGIN_SECRET: cd-server's OriginGuard (cd-platform#178)
       # rejects any /v1 request whose X-Origin-Verify header doesn't match
       # it, so /v1 is only reachable through API Gateway's key check, not
       # directly via server.civicdog.com. Service task only -- the migrate
       # task never serves requests. A cd-server image without #178 just
-      # ignores the variable.
+      # ignores the variable. CD_API_PGUSER/CD_API_PGPASSWORD complete the
+      # CD_API_PG* settings above.
       secrets = concat(local.cd_server_secrets, [
         { name = "CD_API_ORIGIN_SECRET", valueFrom = aws_secretsmanager_secret.origin_secret.arn },
+        { name = "CD_API_PGUSER", valueFrom = "${data.aws_secretsmanager_secret.cd_api_app_db.arn}:username::" },
+        { name = "CD_API_PGPASSWORD", valueFrom = "${data.aws_secretsmanager_secret.cd_api_app_db.arn}:password::" },
       ])
 
       logConfiguration = {
@@ -923,9 +993,118 @@ resource "aws_lb_listener" "https" {
   ssl_policy      = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn = aws_acm_certificate_validation.server_domain.certificate_arn
 
+  # Still a forward for now. The goal is an allow-list: only the paths
+  # cd-server serves publicly are forwarded (the rules below), and this
+  # default becomes a fixed 404. ALB path patterns match the raw request
+  # path, but uvicorn percent-decodes it before Starlette routes it, so a
+  # deny-list can be sidestepped with an encoded path like /%761/members;
+  # with an allow-list, an encoded or unknown path never matches a forward
+  # rule. (Target-group health checks go straight to the tasks and skip
+  # listener rules, so /health's own rule is only for outside callers.)
+  #
+  # The switch to the 404 is a separate, later apply, once the rules below
+  # exist and /graphql is verified through them. In one apply, Terraform
+  # modifies this listener before creating the rules that reference it:
+  # on 2026-10-28 that took server.civicdog.com down for ~18 minutes, when
+  # the 404 landed and every CreateRule then failed with AccessDenied.
+  # Until the switch, an encoded /v1 path still reaches the app, where
+  # OriginGuard rejects it.
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.cd_server.arn
+  }
+}
+
+# /v1 requires the origin secret at the ALB too, not only in cd-server's
+# OriginGuard (cd-platform#178), so a regression in the app can't open
+# /v1 to callers that skipped API Gateway's X-Api-Key check. ALB rule
+# conditions only AND together and can't be negated, so it takes a forward
+# rule for /v1 with the matching X-Origin-Verify header, then 403 rules
+# for any other /v1 request. The rest of cd-server's public paths get
+# their own forward rule (cd_server_public_paths); everything else hits
+# the listener's default 404.
+#
+# ALB header matching is case-insensitive; OriginGuard still does the
+# exact comparison. Rotating random_password.origin_secret updates these
+# rules in the same apply, but running tasks only pick up the new
+# CD_API_ORIGIN_SECRET on a redeploy -- /v1 returns OriginGuard's 403
+# until then.
+locals {
+  v1_path_patterns = ["/v1", "/v1/*"]
+}
+
+resource "aws_lb_listener_rule" "v1_from_api_gateway" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 10
+
+  condition {
+    path_pattern {
+      values = local.v1_path_patterns
+    }
+  }
+
+  # The value sits here in plaintext: readable with
+  # elasticloadbalancing:DescribeRules and in CloudTrail's CreateRule/
+  # ModifyRule events, not only through Secrets Manager. Accepted --
+  # see CLAUDE.md.
+  condition {
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = [random_password.origin_secret.result]
+    }
+  }
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.cd_server.arn
+  }
+}
+
+# cd-server's public paths outside /v1: cd-webapp's GraphQL endpoint and
+# the two plain REST endpoints (cd-server/src/cd/server/app.py). A new
+# top-level route needs adding here, or the ALB 404s it -- failing closed.
+# Exact paths: the outer app's own /docs and /openapi.json stay unreachable.
+resource "aws_lb_listener_rule" "cd_server_public_paths" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 20
+
+  condition {
+    path_pattern {
+      values = ["/graphql", "/health", "/version"]
+    }
+  }
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.cd_server.arn
+  }
+}
+
+# One body for every /v1 path, problem+json-shaped (cd-server-deploy.yml's
+# direct-/v1 check reads its `status`). OriginGuard sends a JSON:API error
+# document under cd.api's JSON:API namespaces instead; matching that here
+# would mean copying cd.api's route list into this rule. Only callers that
+# skip API Gateway ever see this response. An ALB fixed response allows
+# just a few content types, so it's application/json rather than
+# application/problem+json.
+resource "aws_lb_listener_rule" "v1_direct_forbidden" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 30
+
+  condition {
+    path_pattern {
+      values = local.v1_path_patterns
+    }
+  }
+
+  action {
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "application/json"
+      message_body = jsonencode({ type = "about:blank", title = "Forbidden", status = 403, detail = "Forbidden." })
+      status_code  = "403"
+    }
   }
 }
 
@@ -1159,6 +1338,17 @@ data "aws_iam_policy_document" "cd_server_deploy_permissions" {
     sid       = "DescribeMigrationTasks"
     actions   = ["ecs:DescribeTasks"]
     resources = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.cd_server.name}/*"]
+  }
+
+  # cd-infra#76 part A: cd-platform#179 moves the openapi.json publish
+  # (for docs.civicdog.com's API reference) from cd-api-deploy.yml into
+  # cd-server-deploy.yml. Same single-key scope as ../cd-api's
+  # cd_api_deploy_openapi_publish. The bucket stays in ../cd-api, so its
+  # name comes from that stack's state.
+  statement {
+    sid       = "PublishOpenApiSpec"
+    actions   = ["s3:PutObject"]
+    resources = ["arn:aws:s3:::${data.terraform_remote_state.cd_api.outputs.openapi_spec_bucket_name}/openapi.json"]
   }
 
   # RunTask requires PassRole for the roles it hands the task.
