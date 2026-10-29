@@ -993,25 +993,28 @@ resource "aws_lb_listener" "https" {
   ssl_policy      = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn = aws_acm_certificate_validation.server_domain.certificate_arn
 
-  # Still a forward for now. The goal is an allow-list: only the paths
-  # cd-server serves publicly are forwarded (the rules below), and this
-  # default becomes a fixed 404. ALB path patterns match the raw request
-  # path, but uvicorn percent-decodes it before Starlette routes it, so a
-  # deny-list can be sidestepped with an encoded path like /%761/members;
-  # with an allow-list, an encoded or unknown path never matches a forward
-  # rule. (Target-group health checks go straight to the tasks and skip
-  # listener rules, so /health's own rule is only for outside callers.)
+  # Allow-list: only the paths cd-server serves publicly are forwarded (the
+  # rules below); anything else gets a 404 here, before it reaches the app.
+  # ALB path patterns match the raw request path, but uvicorn
+  # percent-decodes it before Starlette routes it, so a deny-list can be
+  # sidestepped with an encoded path like /%761/members; with an
+  # allow-list, an encoded or unknown path never matches a forward rule.
+  # (Target-group health checks go straight to the tasks and skip listener
+  # rules, so /health's own rule is only for outside callers.)
   #
-  # The switch to the 404 is a separate, later apply, once the rules below
-  # exist and /graphql is verified through them. In one apply, Terraform
-  # modifies this listener before creating the rules that reference it:
-  # on 2026-10-28 that took server.civicdog.com down for ~18 minutes, when
-  # the 404 landed and every CreateRule then failed with AccessDenied.
-  # Until the switch, an encoded /v1 path still reaches the app, where
-  # OriginGuard rejects it.
+  # Whenever a change removes a forward path and adds its replacement,
+  # apply the replacement first, in its own apply. Terraform modifies this
+  # listener before creating rules that reference it, so in one apply a
+  # failed rule leaves nothing forwarding: on 2026-10-28 that took
+  # server.civicdog.com down for ~18 minutes (cd-infra#77).
   default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.cd_server.arn
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "application/json"
+      message_body = jsonencode({ type = "about:blank", title = "Not Found", status = 404, detail = "Not Found." })
+      status_code  = "404"
+    }
   }
 }
 
