@@ -1011,11 +1011,15 @@ resource "aws_lb_listener" "https" {
   # (Target-group health checks go straight to the tasks and skip listener
   # rules, so /health's own rule is only for outside callers.)
   #
-  # Whenever a change removes a forward path and adds its replacement,
-  # apply the replacement first, in its own apply. Terraform modifies this
-  # listener before creating rules that reference it, so in one apply a
-  # failed rule leaves nothing forwarding: on 2026-10-28 that took
-  # server.civicdog.com down for ~18 minutes (cd-infra#77).
+  # Editing a forward rule's paths in place is a single ModifyRule, so it's
+  # safe in one apply. Replacing a forward rule is not: Terraform destroys
+  # the old rule before creating the new one (create_before_destroy can't
+  # help, since both would want the same priority), and the gap -- or a
+  # create that fails, as every CreateRule did on 2026-10-28 when
+  # cd-terraform lacked the permission (cd-infra#77, ~18 minutes down) --
+  # leaves those paths on this 404. Rename a rule with a `moved` block; if
+  # a change forces replacement, first add a temporary forward rule at
+  # another priority in its own apply, then remove it afterwards.
   default_action {
     type = "fixed-response"
 
