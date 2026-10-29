@@ -1032,6 +1032,10 @@ resource "aws_lb_listener_rule" "v1_from_api_gateway" {
     }
   }
 
+  # The value sits here in plaintext: readable with
+  # elasticloadbalancing:DescribeRules and in CloudTrail's CreateRule/
+  # ModifyRule events, not only through Secrets Manager. Accepted --
+  # see CLAUDE.md.
   condition {
     http_header {
       http_header_name = "X-Origin-Verify"
