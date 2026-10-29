@@ -53,6 +53,14 @@ data "terraform_remote_state" "rds" {
   }
 }
 
+# The instance itself, for its initial database's name (cd-etl's
+# cd_platform, which cd.api reads as CD_API_PGDATABASE) -- read from the
+# instance rather than repeated here, so it can't drift from ../rds's
+# db_name. ../rds has no output for it, and this avoids an apply there.
+data "aws_db_instance" "cd_platform" {
+  db_instance_identifier = data.terraform_remote_state.rds.outputs.rds_instance_identifier
+}
+
 # cd-infra#48: cd-server's Cognito JWT verification (settings.py's
 # get_users_service()) needs the same User Pool cd-webapp's own login
 # flow issues tokens against -- both App Clients' IDs (prod + local dev)
@@ -862,7 +870,7 @@ resource "aws_ecs_task_definition" "cd_server" {
         { name = "CD_SERVER_MIGRATE_TASK", value = "1" },
         { name = "CD_API_PGHOST", value = data.terraform_remote_state.rds.outputs.rds_address },
         { name = "CD_API_PGPORT", value = "5432" },
-        { name = "CD_API_PGDATABASE", value = var.cd_platform_db_name },
+        { name = "CD_API_PGDATABASE", value = data.aws_db_instance.cd_platform.db_name },
         { name = "CD_API_PG_POOL_SIZE", value = "10" },
       ])
       # CD_API_ORIGIN_SECRET: cd-server's OriginGuard (cd-platform#178)
