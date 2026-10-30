@@ -952,6 +952,18 @@ resource "aws_lb" "cd_server" {
   # the target -- guards against header-smuggling-style abuse.
   drop_invalid_header_fields = true
 
+  # Explicit (it's the default) because cd-server depends on it: uvicorn's
+  # keep-alive, UVICORN_TIMEOUT_KEEP_ALIVE in cd-platform's
+  # cd-server/docker/Dockerfile (65, from cd-platform#197; releases before
+  # it run uvicorn's 5s default), must stay above this. Otherwise the
+  # ALB reuses a connection uvicorn just closed and answers with its own
+  # CORS-less 502, which cd-webapp shows as "Could not reach the lookup
+  # service". The two deploy separately, so order the change: to raise
+  # this, release cd-server with the higher keep-alive first, then apply;
+  # to lower the keep-alive, apply the lower idle_timeout first. A request
+  # running longer than this gets the ALB's 504.
+  idle_timeout = 60
+
   tags = {
     Project = "cd-platform"
   }
@@ -993,25 +1005,32 @@ resource "aws_lb_listener" "https" {
   ssl_policy      = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn = aws_acm_certificate_validation.server_domain.certificate_arn
 
-  # Still a forward for now. The goal is an allow-list: only the paths
-  # cd-server serves publicly are forwarded (the rules below), and this
-  # default becomes a fixed 404. ALB path patterns match the raw request
-  # path, but uvicorn percent-decodes it before Starlette routes it, so a
-  # deny-list can be sidestepped with an encoded path like /%761/members;
-  # with an allow-list, an encoded or unknown path never matches a forward
-  # rule. (Target-group health checks go straight to the tasks and skip
-  # listener rules, so /health's own rule is only for outside callers.)
+  # Allow-list: only the paths cd-server serves publicly are forwarded (the
+  # rules below); anything else gets a 404 here, before it reaches the app.
+  # ALB path patterns match the raw request path, but uvicorn
+  # percent-decodes it before Starlette routes it, so a deny-list can be
+  # sidestepped with an encoded path like /%761/members; with an
+  # allow-list, an encoded or unknown path never matches a forward rule.
+  # (Target-group health checks go straight to the tasks and skip listener
+  # rules, so /health's own rule is only for outside callers.)
   #
-  # The switch to the 404 is a separate, later apply, once the rules below
-  # exist and /graphql is verified through them. In one apply, Terraform
-  # modifies this listener before creating the rules that reference it:
-  # on 2026-10-28 that took server.civicdog.com down for ~18 minutes, when
-  # the 404 landed and every CreateRule then failed with AccessDenied.
-  # Until the switch, an encoded /v1 path still reaches the app, where
-  # OriginGuard rejects it.
+  # Editing a forward rule's paths in place is a single ModifyRule, so it's
+  # safe in one apply. Replacing a forward rule is not: Terraform destroys
+  # the old rule before creating the new one (create_before_destroy can't
+  # help, since both would want the same priority), and the gap -- or a
+  # create that fails, as every CreateRule did on 2026-10-28 when
+  # cd-terraform lacked the permission (cd-infra#77, ~18 minutes down) --
+  # leaves those paths on this 404. Rename a rule with a `moved` block; if
+  # a change forces replacement, first add a temporary forward rule at
+  # another priority in its own apply, then remove it afterwards.
   default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.cd_server.arn
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "application/json"
+      message_body = local.problem_bodies["404"]
+      status_code  = "404"
+    }
   }
 }
 
@@ -1031,6 +1050,14 @@ resource "aws_lb_listener" "https" {
 # until then.
 locals {
   v1_path_patterns = ["/v1", "/v1/*"]
+
+  # problem+json bodies for the listener's fixed responses (the default 404
+  # and v1_direct_forbidden's 403), so the two can't drift apart.
+  # cd-server-deploy.yml's direct-/v1 check reads `status`.
+  problem_bodies = {
+    for status, title in { "403" = "Forbidden", "404" = "Not Found" } :
+    status => jsonencode({ type = "about:blank", title = title, status = tonumber(status), detail = "${title}." })
+  }
 }
 
 resource "aws_lb_listener_rule" "v1_from_api_gateway" {
@@ -1102,7 +1129,7 @@ resource "aws_lb_listener_rule" "v1_direct_forbidden" {
 
     fixed_response {
       content_type = "application/json"
-      message_body = jsonencode({ type = "about:blank", title = "Forbidden", status = 403, detail = "Forbidden." })
+      message_body = local.problem_bodies["403"]
       status_code  = "403"
     }
   }
