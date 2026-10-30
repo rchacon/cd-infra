@@ -104,3 +104,10 @@ variable "api_domain_name" {
   type        = string
   default     = "api.civicdog.com"
 }
+
+# A variable, not ../cd-server's state: that stack already reads this one's.
+variable "cd_server_domain_name" {
+  description = "cd-server's public hostname (its ALB). API Gateway's /v1 integrations forward there."
+  type        = string
+  default     = "server.civicdog.com"
+}
