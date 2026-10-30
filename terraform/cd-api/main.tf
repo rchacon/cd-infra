@@ -345,16 +345,46 @@ resource "aws_api_gateway_method" "proxy_any" {
   http_method      = "ANY"
   authorization    = "NONE"
   api_key_required = true
+
+  # Declares {proxy} so the integration below can map it into its URI.
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
 }
 
-resource "aws_api_gateway_integration" "proxy_lambda" {
+# /v1 is served by cd-server now (cd-platform#178), not the Lambda
+# (cd-infra#76 part B). API Gateway stays in front for X-Api-Key and the
+# usage plan, and forwards over HTTPS to cd-server's public ALB, which
+# forwards /v1 only when X-Origin-Verify carries the origin secret (see
+# ../cd-server's v1_from_api_gateway rule; cd-server's OriginGuard checks
+# it again). The URI keeps the /v1 prefix: API Gateway strips the
+# custom domain's v1 base path before matching {proxy+}, and cd-server
+# mounts cd.api at /v1. Query strings pass through unchanged. Rollback,
+# until part C removes the Lambda: point both integrations back at
+# aws_lambda_function.cd_api.invoke_arn (type AWS_PROXY, POST).
+resource "aws_api_gateway_integration" "proxy" {
   rest_api_id             = aws_api_gateway_rest_api.cd_api.id
   resource_id             = aws_api_gateway_resource.proxy.id
   http_method             = aws_api_gateway_method.proxy_any.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.cd_api.invoke_arn
+  integration_http_method = "ANY"
+  type                    = "HTTP_PROXY"
+  uri                     = "${local.cd_server_v1_url}/{proxy}"
+
+  request_parameters = {
+    "integration.request.path.proxy"             = "method.request.path.proxy"
+    "integration.request.header.X-Origin-Verify" = local.origin_verify_header
+  }
 }
+
+# Applying the switch from the Lambda integrations: run `terraform state rm
+# aws_api_gateway_integration.proxy_lambda aws_api_gateway_integration.root_lambda`
+# first, so the plan has no DeleteIntegration in it. A method has exactly
+# one integration, and these resources' create (PutIntegration) overwrites
+# it in place. Replacing it instead (type and integration_http_method
+# force a replacement) runs create-before-destroy, inherited from the
+# deployment below, and the old resource's delete then removes the new
+# integration. A `removed` block can't do this: its forget step forms a
+# cycle with the deployment's replacement.
 
 resource "aws_api_gateway_method" "root_any" {
   rest_api_id      = aws_api_gateway_rest_api.cd_api.id
@@ -364,25 +394,54 @@ resource "aws_api_gateway_method" "root_any" {
   api_key_required = true
 }
 
-resource "aws_api_gateway_integration" "root_lambda" {
+# Trailing slash: cd-server answers a bare /v1 with a redirect to /v1/ (on
+# http://server.civicdog.com, the wrong host and scheme for an API
+# caller). /v1/ gets cd.api's problem+json 404 directly, which is what
+# the Lambda returned for the root.
+resource "aws_api_gateway_integration" "root" {
   rest_api_id             = aws_api_gateway_rest_api.cd_api.id
   resource_id             = aws_api_gateway_rest_api.cd_api.root_resource_id
   http_method             = aws_api_gateway_method.root_any.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.cd_api.invoke_arn
+  integration_http_method = "ANY"
+  type                    = "HTTP_PROXY"
+  uri                     = "${local.cd_server_v1_url}/"
+
+  request_parameters = {
+    "integration.request.header.X-Origin-Verify" = local.origin_verify_header
+  }
+}
+
+# The origin secret lives in ../cd-server (cd-infra#75), read here by its
+# fixed name rather than through cd-server's state: ../cd-server already
+# reads this stack's state, and the dependency shouldn't run both ways.
+# A rotation needs an apply here too (see ../cd-server's
+# random_password.origin_secret). Its plaintext also ends up in this
+# stack's state and in the integration's settings (apigateway:GET);
+# accepted, see CLAUDE.md.
+data "aws_secretsmanager_secret_version" "origin_secret" {
+  secret_id = "cd-platform/cd-server/origin-secret"
+}
+
+locals {
+  cd_server_v1_url = "https://${var.cd_server_domain_name}/${local.api_base_path}"
+  # A static value in request_parameters is a single-quoted literal. The
+  # secret is alphanumeric, so it needs no escaping.
+  origin_verify_header = "'${data.aws_secretsmanager_secret_version.origin_secret.secret_string}'"
 }
 
 resource "aws_api_gateway_deployment" "cd_api" {
   rest_api_id = aws_api_gateway_rest_api.cd_api.id
 
+  # Whole resources, not just ids: an in-place change (an integration's
+  # uri, type or headers) keeps the id, and the stage would keep serving
+  # the old deployment.
   triggers = {
     redeployment = sha1(jsonencode([
-      aws_api_gateway_resource.proxy.id,
-      aws_api_gateway_method.proxy_any.id,
-      aws_api_gateway_integration.proxy_lambda.id,
-      aws_api_gateway_method.root_any.id,
-      aws_api_gateway_integration.root_lambda.id,
+      aws_api_gateway_resource.proxy,
+      aws_api_gateway_method.proxy_any,
+      aws_api_gateway_integration.proxy,
+      aws_api_gateway_method.root_any,
+      aws_api_gateway_integration.root,
     ]))
   }
 
