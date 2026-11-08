@@ -373,6 +373,7 @@ resource "aws_api_gateway_integration" "proxy" {
   request_parameters = {
     "integration.request.path.proxy"             = "method.request.path.proxy"
     "integration.request.header.X-Origin-Verify" = local.origin_verify_header
+    "integration.request.header.x-api-key"       = local.api_key_header_override
   }
 }
 
@@ -408,6 +409,7 @@ resource "aws_api_gateway_integration" "root" {
 
   request_parameters = {
     "integration.request.header.X-Origin-Verify" = local.origin_verify_header
+    "integration.request.header.x-api-key"       = local.api_key_header_override
   }
 }
 
@@ -427,6 +429,12 @@ locals {
   # A static value in request_parameters is a single-quoted literal. The
   # secret is alphanumeric, so it needs no escaping.
   origin_verify_header = "'${data.aws_secretsmanager_secret_version.origin_secret.secret_string}'"
+  # HTTP_PROXY forwards the client's headers, including the customer's
+  # X-Api-Key, which the Lambda path never sent anywhere. API Gateway has
+  # already checked the key, and cd-server doesn't use it, so overwrite it
+  # with a fixed placeholder. Anything in cd-server that logs request
+  # headers then can't write customer keys to CloudWatch.
+  api_key_header_override = "'redacted'"
 }
 
 resource "aws_api_gateway_deployment" "cd_api" {
