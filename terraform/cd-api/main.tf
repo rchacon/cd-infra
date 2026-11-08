@@ -414,8 +414,10 @@ resource "aws_api_gateway_integration" "root" {
 }
 
 # The origin secret lives in ../cd-server (cd-infra#75), read here by its
-# fixed name rather than through cd-server's state: ../cd-server already
-# reads this stack's state, and the dependency shouldn't run both ways.
+# fixed name rather than through cd-server's state, since ../cd-server
+# already reads this stack's state. Until cd-infra#76 parts C/D, that's
+# still a cycle when building from an empty account; see CLAUDE.md for
+# the bootstrap order.
 # A rotation needs an apply here too (see ../cd-server's
 # random_password.origin_secret). Its plaintext also ends up in this
 # stack's state and in the integration's settings (apigateway:GET);
