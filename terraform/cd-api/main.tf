@@ -440,17 +440,31 @@ locals {
 resource "aws_api_gateway_deployment" "cd_api" {
   rest_api_id = aws_api_gateway_rest_api.cd_api.id
 
-  # Whole resources, not just ids: an in-place change (an integration's
-  # uri, type or headers) keeps the id, and the stage would keep serving
-  # the old deployment.
+  # The attributes that shape what the stage serves, not just ids: an
+  # in-place change (an integration's uri, type or headers) keeps the id,
+  # and the stage would keep serving the old deployment. Not whole resource
+  # objects either: a provider upgrade that adds an attribute would change
+  # the hash and redeploy with no real config change. Add an attribute here
+  # when one starts to matter. request_parameters includes the origin
+  # secret, so a rotation redeploys. The hash is marked nonsensitive so the
+  # plan shows that the trigger changed; a SHA-1 of a long random secret
+  # doesn't reveal it.
   triggers = {
-    redeployment = sha1(jsonencode([
-      aws_api_gateway_resource.proxy,
-      aws_api_gateway_method.proxy_any,
-      aws_api_gateway_integration.proxy,
-      aws_api_gateway_method.root_any,
-      aws_api_gateway_integration.root,
-    ]))
+    redeployment = nonsensitive(sha1(jsonencode([
+      aws_api_gateway_resource.proxy.path_part,
+      [for m in [aws_api_gateway_method.proxy_any, aws_api_gateway_method.root_any] : {
+        http_method        = m.http_method
+        authorization      = m.authorization
+        api_key_required   = m.api_key_required
+        request_parameters = m.request_parameters
+      }],
+      [for i in [aws_api_gateway_integration.proxy, aws_api_gateway_integration.root] : {
+        type                    = i.type
+        integration_http_method = i.integration_http_method
+        uri                     = i.uri
+        request_parameters      = i.request_parameters
+      }],
+    ])))
   }
 
   lifecycle {
